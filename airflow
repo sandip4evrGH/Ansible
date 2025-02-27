@@ -1,0 +1,80 @@
+### Airflow Installation Playbook
+
+```yaml
+---
+- name: Install Airflow
+  hosts: all
+  become: yes
+  vars:
+    airflow_version: "2.2.5"
+    repo_url: "https://your-git-repo-url"
+    repo_branch: "release-{{ airflow_version }}"
+
+  tasks:
+
+```
+### Manage DAGs Playbook
+
+```yaml
+---
+- name: Manage Airflow DAGs
+  hosts: all
+  become: yes
+  vars:
+    dag_action: "add"  # Options: add, remove, update
+    dag_name: "example_dag.py"
+    dag_folder: "dev"  # Options: dev, production
+    repo_url: "https://your-git-repo-url"
+    repo_branch: "master"
+    dag_repo_path: "/path/to/dags/repo"
+    dag_dest_path: "/path/to/airflow/dags/"
+
+  tasks:
+    - name: Clone or update repository (only if adding or updating)
+      git:
+        repo: "{{ repo_url }}"
+        dest: "{{ dag_repo_path }}"
+        version: "{{ repo_branch }}"
+      when: dag_action in ['add', 'update']
+
+    - name: Add DAG
+      copy:
+        src: "{{ dag_repo_path }}/{{ dag_folder }}/{{ dag_name }}"
+        dest: "{{ dag_dest_path }}/{{ dag_name }}"
+      when: dag_action == 'add'
+
+    - name: Remove DAG
+      file:
+        path: "{{ dag_dest_path }}/{{ dag_name }}"
+        state: absent
+      when: dag_action == 'remove'
+
+    - name: Update DAGs
+      synchronize:
+        src: "{{ dag_repo_path }}/{{ dag_folder }}/"
+        dest: "{{ dag_dest_path }}"
+        delete: yes
+      when: dag_action == 'update'
+```
+
+### Commands to Run the Playbooks
+
+1. **Install Airflow**:
+```bash
+ansible-playbook install_airflow.yaml -e "airflow_version=2.2.5"
+```
+
+2. **Add a DAG**:
+```bash
+ansible-playbook manage_airflow_dags.yaml -e "dag_action=add dag_name=example_dag.py"
+```
+
+3. **Remove a DAG**:
+```bash
+ansible-playbook manage_airflow_dags.yaml -e "dag_action=remove dag_name=example_dag.py"
+```
+
+4. **Update DAGs**:
+```bash
+ansible-playbook manage_airflow_dags.yaml -e "dag_action=update"
+```
