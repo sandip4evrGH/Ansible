@@ -2,15 +2,34 @@
 
 ```yaml
 ---
-- name: Install Airflow
-  hosts: all
-  become: yes
-  vars:
-    airflow_version: "2.2.5"
-    repo_url: "https://your-git-repo-url"
-    repo_branch: "release-{{ airflow_version }}"
+- name: Create Python environment
+  ansible.builtin.command:
+    cmd: python3 -m venv /path/to/your/env
+  args:
+    creates: /path/to/your/env
 
-  tasks:
+- name: Install Ansible 2.9.27
+  ansible.builtin.command:
+    cmd: /path/to/your/env/bin/pip install ansible==2.9.27
+  args:
+    creates: /path/to/your/env/bin/ansible
+
+- name: Copy Airflow configuration file
+  ansible.builtin.template:
+    src: airflow.cfg.j2
+    dest: /path/to/your/airflow.cfg
+
+- name: Copy requirements file
+  ansible.builtin.template:
+    src: requirements.txt.j2
+    dest: /path/to/your/requirements.txt
+
+- name: Install requirements
+  ansible.builtin.command:
+    cmd: /path/to/your/env/bin/pip install -r /path/to/your/requirements.txt
+  args:
+    creates: /path/to/your/env/bin/airflow
+
 
 ```
 ### Manage DAGs Playbook
