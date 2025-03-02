@@ -1,0 +1,43 @@
+from confluent_kafka import KafkaConsumer, KafkaException
+
+def list_topics(consumer):
+    """Fetches the list of topics and their partitions from the Kafka broker."""
+    metadata = consumer.list_topics(timeout=10)
+    topics = metadata.topics
+    return topics
+
+def get_offsets(consumer, topic, partitions):
+    """Fetches the offsets for a given topic."""
+    offsets = {}
+    for partition in partitions:
+        tp = [partition]
+        low, high = consumer.get_watermark_offsets(tp[0])
+        offsets[partition.partition] = {'low': low, 'high': high}
+    return offsets
+
+def main():
+    broker = 'localhost:9092'  # Change this to your Kafka broker address
+
+    # Create a Kafka consumer
+    consumer = KafkaConsumer(bootstrap_servers=broker, group_id='offset_fetch_group', auto_offset_reset='earliest')
+
+    # List topics
+    topics = list_topics(consumer)
+    print("Topics:")
+    for topic, metadata in topics.items():
+        print(f"  - {topic}")
+        
+        # Get partitions for the topic
+        partitions = [p for p in metadata.partitions.values()]
+        
+        # Get offsets for the topic
+        offsets = get_offsets(consumer, topic, partitions)
+        
+        print(f"Offsets for topic '{topic}':")
+        for partition, offset in offsets.items():
+            print(f"  Partition {partition}: low = {offset['low']}, high = {offset['high']}")
+
+    consumer.close()
+
+if __name__ == '__main__':
+    main()
