@@ -41,3 +41,62 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
+
+
+
+
+from kafka import KafkaConsumer, KafkaAdminClient, TopicPartition
+
+def list_topics(admin_client):
+    """Fetches the list of topics from the Kafka broker."""
+    topics = admin_client.list_topics()
+    return topics
+
+def get_offsets(consumer, topic, partitions):
+    """Fetches the offsets for a given topic."""
+    offsets = {}
+    for partition in partitions:
+        tp = TopicPartition(topic, partition)
+        consumer.assign([tp])
+        consumer.seek_to_beginning(tp)
+        low = consumer.position(tp)
+        consumer.seek_to_end(tp)
+        high = consumer.position(tp)
+        offsets[partition] = {'low': low, 'high': high}
+    return offsets
+
+def main():
+    broker = 'localhost:9092'  # Change this to your Kafka broker address
+
+    # Create a Kafka admin client
+    admin_client = KafkaAdminClient(bootstrap_servers=broker)
+
+    # Create a Kafka consumer
+    consumer = KafkaConsumer(bootstrap_servers=broker, group_id='offset_fetch_group', auto_offset_reset='earliest')
+
+    # List topics
+    topics = list_topics(admin_client)
+    print("Topics:")
+    for topic in topics:
+        print(f"  - {topic}")
+
+        # Get partitions for the topic
+        partitions = admin_client.describe_topics([topic])[0].partitions
+        partition_ids = [p.partition for p in partitions]
+
+        # Get offsets for the topic
+        offsets = get_offsets(consumer, topic, partition_ids)
+
+        print(f"\nOffsets for topic '{topic}':")
+        for partition, offset in offsets.items():
+            print(f"  Partition {partition}: low = {offset['low']}, high = {offset['high']}")
+
+    consumer.close()
+    admin_client.close()
+
+if __name__ == '__main__':
+    main()
+
+
