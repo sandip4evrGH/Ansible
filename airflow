@@ -76,6 +76,41 @@
       when: dag_action == 'update'
 ```
 
+********************************************
+
+- name: Add or update multiple DAGs
+  block:
+    - name: Check if DAG exists and is identical
+      stat:
+        path: "{{ dag_dest_path }}/{{ item }}"
+      register: dag_file
+      loop: "{{ dag_names }}"
+    
+    - name: Compare DAG content
+      command: diff "{{ dag_repo_path }}/{{ dag_folder }}/{{ item }}" "{{ dag_dest_path }}/{{ item }}"
+      register: diff_result
+      failed_when: diff_result.rc not in [0, 1]
+      changed_when: diff_result.rc == 1
+      loop: "{{ dag_names }}"
+      when: dag_file.results[loop.index0].stat.exists
+
+    - name: Copy new or updated DAG
+      copy:
+        src: "{{ dag_repo_path }}/{{ dag_folder }}/{{ item }}"
+        dest: "{{ dag_dest_path }}/{{ item }}"
+      loop: "{{ dag_names }}"
+      when: not dag_file.results[loop.index0].stat.exists or diff_result.changed
+  when: dag_action in ['add', 'update']
+
+- name: Remove multiple DAGs
+  file:
+    path: "{{ dag_dest_path }}/{{ item }}"
+    state: absent
+  loop: "{{ dag_names }}"
+  when: dag_action == 'remove'
+********************************************
+
+
 ### Commands to Run the Playbooks
 
 1. **Install Airflow**:
