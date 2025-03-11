@@ -132,3 +132,92 @@ ansible-playbook manage_airflow_dags.yaml -e "dag_action=remove dag_name=example
 ```bash
 ansible-playbook manage_airflow_dags.yaml -e "dag_action=update"
 ```
+
+
+
+
+
+
+
+To use HashiCorp Vault for managing Kafka user credentials (username and password) securely, you can integrate Vault into your Kafka setup. Here's how you can achieve this:
+
+---
+
+### **1. Set Up Vault**
+- **Install Vault**: Follow the [Vault installation guide](https://developer.hashicorp.com/validated-patterns/vault/vault-securing-kafka) to set up Vault on your system.
+- **Enable the KV Secrets Engine**: Use the KV (Key-Value) secrets engine to store Kafka credentials.
+  ```bash
+  vault secrets enable -path=kafka kv
+  ```
+
+- **Store Kafka Credentials**:
+  For each user, store their credentials in Vault:
+  ```bash
+  vault kv put kafka/user1 username="user1" password="user1-password"
+  vault kv put kafka/user2 username="user2" password="user2-password"
+  ```
+
+---
+
+### **2. Configure Kafka to Use Vault**
+- **Create a Script to Fetch Credentials**:
+  Write a script to fetch credentials from Vault and generate the JAAS configuration dynamically. For example:
+  ```bash
+  #!/bin/bash
+  USERNAME=$(vault kv get -field=username kafka/user1)
+  PASSWORD=$(vault kv get -field=password kafka/user1)
+
+  cat <<EOF > kafka_jaas.conf
+  KafkaClient {
+      org.apache.kafka.common.security.plain.PlainLoginModule required
+      username="$USERNAME"
+      password="$PASSWORD";
+  };
+  EOF
+  ```
+
+- **Run the Script**:
+  Execute the script before starting Kafka to ensure the JAAS file is up-to-date.
+
+---
+
+### **3. Update Kafka Configuration**
+- **Broker Configuration**:
+  Update the `server.properties` file to use SASL/PLAIN:
+  ```plaintext
+  listeners=SASL_PLAINTEXT://:9092
+  sasl.enabled.mechanisms=PLAIN
+  sasl.mechanism.inter.broker.protocol=PLAIN
+  inter.broker.listener.name=SASL_PLAINTEXT
+  ```
+
+- **Client Configuration**:
+  Use the dynamically generated JAAS file in your client properties:
+  ```plaintext
+  security.protocol=SASL_PLAINTEXT
+  sasl.mechanism=PLAIN
+  sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required \
+      username="$(vault kv get -field=username kafka/user1)" \
+      password="$(vault kv get -field=password kafka/user1)";
+  ```
+
+---
+
+### **4. Test the Configuration**
+- **List Topics**:
+  ```bash
+  bin/kafka-topics.sh --bootstrap-server localhost:9092 --list --command-config client.properties
+  ```
+
+- **Produce and Consume Messages**:
+  Use the dynamically fetched credentials to produce and consume messages.
+
+---
+
+### **5. Automate Credential Rotation**
+Vault allows you to rotate secrets periodically. You can set up a policy to rotate Kafka credentials and update them in Vault. Ensure your script fetches the latest credentials before starting Kafka.
+
+---
+
+This approach ensures that Kafka credentials are securely managed and dynamically fetched from Vault, reducing the risk of hardcoding sensitive information. Let me know if you'd like further assistance!
+
