@@ -1,0 +1,51 @@
+---
+- name: Manage specific Airflow DAGs based on pattern and action
+  hosts: localhost
+  vars:
+    dag_pattern: 'test_start*'
+    action: 'copy'  # Possible values: 'copy', 'remove', 'update'
+  tasks:
+    - name: Clone the DAG repository
+      git:
+        repo: 'https://your-repo-url.git'
+        dest: /path/to/local/dags
+        force: yes
+
+    - name: Ensure local DAG directory exists
+      file:
+        path: /path/to/local/dags
+        state: directory
+
+    - name: Find specific DAGs
+      find:
+        paths: /path/to/local/dags
+        patterns: "{{ dag_pattern }}"
+      register: dag_files
+
+    - name: Copy new and updated specific DAGs
+      synchronize:
+        src: "{{ item.path }}"
+        dest: /path/to/airflow/installation/dags/
+        delete: no
+        recursive: yes
+      loop: "{{ dag_files.files }}"
+      loop_control:
+        label: "{{ item.path }}"
+      when: action == 'copy' or action == 'update'
+
+    - name: Remove specific DAGs that no longer exist in the repository
+      find:
+        paths: /path/to/airflow/installation/dags
+        patterns: "{{ dag_pattern }}"
+      register: existing_dags
+
+    - name: Delete outdated DAGs
+      command: rm -f "{{ item.path }}"
+      loop: "{{ existing_dags.files }}"
+      when: item.path not in dag_files.files | map(attribute='path') | list and action == 'remove'
+
+    - name: Restart Airflow scheduler
+      systemd:
+        name: airflow-scheduler
+        state: restarted
+      when: action == 'copy' or action == 'update'
