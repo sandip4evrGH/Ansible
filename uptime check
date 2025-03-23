@@ -1,0 +1,146 @@
+Got it! Here's an updated version of the script that accepts the environments (`dev1`, `prod3`, etc.) as command-line arguments:
+
+---
+
+### **Updated Python Script**
+
+This script uses the `sys.argv` list to read environment arguments provided via the command line:
+
+```python
+import paramiko
+import time
+import os
+import re
+import sys
+
+def parse_ansible_inventory(inventory_path):
+    hosts = []
+    try:
+        with open(inventory_path, 'r') as file:
+            lines = file.readlines()
+            for line in lines:
+                match = re.match(r'(\S+)\s+ansible_host=(\S+)\s+ansible_user=(\S+)\s+ansible_password=(\S+)', line)
+                if match:
+                    host_details = {
+                        "hostname": match.group(2),
+                        "username": match.group(3),
+                        "password": match.group(4),
+                    }
+                    hosts.append(host_details)
+    except FileNotFoundError:
+        print(f"Inventory file not found at: {inventory_path}")
+    return hosts
+
+def ssh_connect_and_fetch(host_details, command):
+    try:
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        print(f"Connecting to {host_details['hostname']}...")
+        client.connect(
+            hostname=host_details['hostname'],
+            username=host_details['username'],
+            password=host_details['password']
+        )
+        print(f"Connected to {host_details['hostname']}!")
+        stdin, stdout, stderr = client.exec_command(command)
+        output = stdout.read().decode().strip()
+        error = stderr.read().decode().strip()
+        
+        if output:
+            print(f"Command Output from {host_details['hostname']}:\n{output}")
+        if error:
+            print(f"Command Error from {host_details['hostname']}:\n{error}")
+        client.close()
+    except Exception as e:
+        print(f"Error connecting to {host_details['hostname']}: {e}")
+
+def get_environment_hosts(base_path, selected_envs):
+    all_hosts = []
+    for env in selected_envs:
+        inventory_path = os.path.join(base_path, env, 'inventory.ini')
+        hosts = parse_ansible_inventory(inventory_path)
+        all_hosts.extend(hosts)
+    return all_hosts
+
+if __name__ == "__main__":
+    # Ensure arguments are provided
+    if len(sys.argv) < 2:
+        print("Usage: python ssh_update_checker.py <env1> <env2> ...")
+        sys.exit(1)
+
+    # Base path to the inventory directories
+    BASE_PATH = "inventories"
+    
+    # Get environments from command-line arguments
+    selected_envs = sys.argv[1:]
+    print(f"Selected environments: {selected_envs}")
+    
+    # Fetch all hosts from the selected environments
+    hosts = get_environment_hosts(BASE_PATH, selected_envs)
+    
+    # Command to execute on each host
+    COMMAND = "uptime"  # Replace with the desired command
+    
+    # Connect to each host and fetch updates every 5 minutes
+    while True:
+        for host in hosts:
+            ssh_connect_and_fetch(host, COMMAND)
+        print("Waiting for 5 minutes before the next update...")
+        time.sleep(300)
+```
+
+---
+
+### **How It Works**
+1. **Command-Line Arguments**:
+   - The script accepts environment names as command-line arguments (e.g., `dev1`, `prod3`).
+   - These arguments are accessed through `sys.argv`.
+
+2. **Dynamic Parsing**:
+   - The specified environment names are used to locate inventory files in the `inventories/` directory.
+   - Hosts are extracted from the relevant inventory files.
+
+3. **Execution Loop**:
+   - The script connects to each host, runs a specified command (`uptime`), and repeats every 5 minutes.
+
+---
+
+### **Steps to Run**
+
+1. **Set Up Directory Structure**:
+   Create the following structure:
+   ```
+   inventories/
+   ├── dev1/
+   │   └── inventory.ini
+   ├── prod3/
+   │   └── inventory.ini
+   ```
+
+2. **Inventory Files**:
+   Each `inventory.ini` file should include host details in this format:
+   ```
+   [all]
+   host1 ansible_host=192.168.1.101 ansible_user=user1 ansible_password=pass1
+   host2 ansible_host=192.168.1.102 ansible_user=user2 ansible_password=pass2
+   ```
+
+3. **Run the Script**:
+   Specify the environments as command-line arguments:
+   ```bash
+   python ssh_update_checker.py dev1 prod3
+   ```
+
+   This example parses the inventories in `dev1` and `prod3`.
+
+4. **Output**:
+   The script connects to each host, fetches command output (e.g., `uptime`), and repeats every 5 minutes.
+
+---
+
+### **Enhancements**
+- **Validation**: Add checks to ensure that the specified environments exist.
+- **Asynchronous Execution**: Use multithreading or `asyncio` to connect to multiple hosts in parallel.
+- **Secure Credentials**: Replace plaintext passwords with a secure method like Ansible Vault.
+
+Let me know if you'd like additional features or help!
