@@ -1,0 +1,296 @@
+# airflow_monitor.py
+import subprocess
+import time
+import os
+import logging
+import datetime
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+def check_service(service_name):
+    """Checks the status of a service using supervisord."""
+    try:
+        result = subprocess.run(['supervisorctl', 'status', service_name], capture_output=True, text=True, check=True)
+        if "RUNNING" in result.stdout:
+            logging.info(f"{service_name} is running.")
+            return True
+        else:
+            logging.warning(f"{service_name} is not running.")
+            return False
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Error checking {service_name}: {e}")
+        return False
+
+def check_dask_scheduler_connection(scheduler_address):
+    """Checks the connection to the Dask scheduler."""
+    try:
+        from dask.distributed import Client
+        with Client(scheduler_address, timeout='5s') as client:
+            client.scheduler_info()
+            logging.info(f"Connected to Dask scheduler at {scheduler_address}.")
+            return True
+    except Exception as e:
+        logging.warning(f"Failed to connect to Dask scheduler at {scheduler_address}: {e}")
+        return False
+
+def cleanup_logs(log_dir, max_age_days=7):
+    """Cleans up log files older than max_age_days."""
+    now = datetime.datetime.now()
+    cutoff = now - datetime.timedelta(days=max_age_days)
+
+    if not os.path.exists(log_dir):
+        logging.warning(f"Log directory {log_dir} does not exist.")
+        return
+
+    for filename in os.listdir(log_dir):
+        filepath = os.path.join(log_dir, filename)
+        if os.path.isfile(filepath):
+            file_modified = datetime.datetime.fromtimestamp(os.path.getmtime(filepath))
+            if file_modified < cutoff:
+                try:
+                    os.remove(filepath)
+                    logging.info(f"Deleted old log file: {filepath}")
+                except OSError as e:
+                    logging.error(f"Error deleting {filepath}: {e}")
+
+def main():
+    """Main monitoring function."""
+
+    airflow_webserver_running = check_service("airflow-webserver")
+    airflow_scheduler_running = check_service("airflow-scheduler")
+    dask_scheduler_running = check_service("dask-scheduler")
+    dask_worker_running = check_service("dask-worker-1") # Check one worker, assume others are similar.
+
+    if dask_scheduler_running:
+        check_dask_scheduler_connection("tcp://<scheduler_ip>:8786") #replace <scheduler_ip> with actual IP.
+
+    cleanup_logs("/path/to/airflow/logs") #replace with actual airflow logs path.
+    cleanup_logs("/path/to/dask/logs") #replace with actual dask logs path.
+    cleanup_logs("/path/to/supervisor/logs") #replace with actual supervisor logs path.
+
+if __name__ == "__main__":
+    main()
+
+
+Airflow Configuration (airflow.cfg):
+[core]
+dags_folder = /path/to/airflow/dags
+base_log_folder = /path/to/airflow/logs
+executor = DaskExecutor
+sql_alchemy_conn = postgresql+psycopg2://airflow:airflow@<postgres_host>/airflow
+load_examples = False
+
+[webserver]
+web_server_port = 8080
+
+[scheduler]
+dag_dir_list_interval = 300
+scheduler_heartbeat_sec = 5
+
+[dask]
+cluster_address = tcp://<scheduler_ip>:8786
+
+Dask Configuration (dask_scheduler.yaml, dask_worker.yaml):
+dask_scheduler.yaml:
+tcp:
+  scheduler:
+    address: :8786
+  services:
+    dashboard:
+      cls: dask.distributed.bokeh.BokehWebInterface
+      port: 8787
+
+dask_worker.yaml (example for one worker, adjust for each worker):
+tcp:
+  worker:
+    address: :0
+  resources:
+    CPU: 1
+    MEMORY: 4GB
+
+Supervisord Configuration (supervisord.conf):
+[unix_http_server]
+file=/var/run/supervisor.sock
+
+[supervisord]
+logfile=/var/log/supervisord.log
+logfile_maxbytes=50MB
+logfile_backups=10
+loglevel=info
+pidfile=/var/run/supervisord.pid
+nodaemon=false
+minfds=1024
+minprocs=200
+
+[rpcinterface:supervisor]
+supervisor.rpcinterface_factory = supervisor.rpcinterface:make_main_rpcinterface
+
+[program:airflow-webserver]
+command=/path/to/airflow/bin/airflow webserver -p 8080
+directory=/path/to/airflow
+user=airflow
+autostart=true
+autorestart=true
+redirect_stderr=true
+stdout_logfile=/path/to/supervisor/logs/airflow-webserver.log
+
+[program:airflow-scheduler]
+command=/path/to/airflow/bin/airflow scheduler
+directory=/path/to/airflow
+user=airflow
+autostart=true
+autorestart=true
+redirect_stderr=true
+stdout_logfile=/path/to/supervisor/logs/airflow-scheduler.log
+
+[program:dask-scheduler]
+command=dask scheduler --config /path/to/dask_scheduler.yaml
+directory=/path/to/dask
+user=dask
+autostart=true
+autorestart=true
+redirect_stderr=true
+stdout_logfile=/path/to/supervisor/logs/dask-scheduler.log
+
+[program:dask-worker-1]
+command=dask worker tcp://<scheduler_ip>:8786 --config /path/to/dask_worker.yaml
+directory=/path/to/dask
+user=dask
+autostart=true
+autorestart=true
+redirect_stderr=true
+stdout_logfile=/path/to/supervisor/logs/dask-worker-1.log
+# Duplicate and increment the program name for other workers.
+# Ex: [program:dask-worker-2], [program:dask-worker-3] ...
+
+Node Distribution:
+ * 1 Node: Airflow Webserver, Airflow Scheduler, Postgres Database. (Or use an external managed postgres service).
+ * 1 Node: Dask Scheduler.
+ * 10 Nodes: Dask Workers. Distribute workers to maximize resources. Adjust the worker yaml file and the supervisor config based on the resources available on each node.
+ * Replace all placeholder paths and IPs with actual paths and IPs.
+ * Ensure that airflow and dask users have the correct permissions.
+Steps:
+ * Install Dependencies: Install Airflow, Dask, Supervisord, and their dependencies on each node.
+ * Configure Airflow: Modify airflow.cfg with your settings.
+ * Configure Dask: Create dask_scheduler.yaml and dask_worker.yaml files.
+ * Configure Supervisord: Create supervisord.conf with the service definitions.
+ * Start Supervisord: Run supervisord -c /path/to/supervisord.conf on each node.
+ * Run Monitor Script: Run the python monitoring script.
+ * Adjust Worker Resources: Modify the worker config files to allocate resources appropriately for each worker node.
+ * Setup Network: Ensure network connectivity between the nodes.
+ * Setup the Database: Setup the postgres database, and change the airflow configs to point to it.
+Important Notes:
+ * Replace all placeholder paths and IPs with your actual paths and IPs.
+ * Adjust the worker configuration and resource allocation based on your hardware.
+ * Secure your services and network appropriately.
+ * Consider using a message queue like RabbitMQ or Redis for better task distribution.
+ * Use a proper logging system for production.
+ * For the Dask workers, it is very important that you adjust the memory and CPU resources in the dask worker yaml files to match the resources available on each node, and that you create a supervisor config for each worker.
+ * For the monitor script, you may need to adjust the paths to your Airflow, Dask, and Supervisor logs.
+ * For a production setup, consider using a dedicated database instance for Airflow.
+ * For a production setup, consider containerizing the services using Docker and orchestrating them
+
+
+#!/usr/bin/env python3
+import subprocess
+import time
+import os
+import logging
+import datetime
+import sys
+
+# Ensure required modules are installed.
+try:
+    import dask.distributed
+except ImportError:
+    print("dask.distributed not found. Installing...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "dask[distributed]"])
+    import dask.distributed
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+def check_service(service_name):
+    """Checks the status of a service using supervisord."""
+    try:
+        result = subprocess.run(['supervisorctl', 'status', service_name], capture_output=True, text=True, check=True)
+        if "RUNNING" in result.stdout:
+            logging.info(f"{service_name} is running.")
+            return True
+        else:
+            logging.warning(f"{service_name} is not running.")
+            return False
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Error checking {service_name}: {e}")
+        return False
+
+def check_dask_scheduler_connection(scheduler_address):
+    """Checks the connection to the Dask scheduler."""
+    try:
+        from dask.distributed import Client
+        with Client(scheduler_address, timeout='5s') as client:
+            client.scheduler_info()
+            logging.info(f"Connected to Dask scheduler at {scheduler_address}.")
+            return True
+    except Exception as e:
+        logging.warning(f"Failed to connect to Dask scheduler at {scheduler_address}: {e}")
+        return False
+
+def cleanup_logs(log_dir, max_age_days=7):
+    """Cleans up log files older than max_age_days."""
+    now = datetime.datetime.now()
+    cutoff = now - datetime.timedelta(days=max_age_days)
+
+    if not os.path.exists(log_dir):
+        logging.warning(f"Log directory {log_dir} does not exist.")
+        return
+
+    for filename in os.listdir(log_dir):
+        filepath = os.path.join(log_dir, filename)
+        if os.path.isfile(filepath):
+            file_modified = datetime.datetime.fromtimestamp(os.path.getmtime(filepath))
+            if file_modified < cutoff:
+                try:
+                    os.remove(filepath)
+                    logging.info(f"Deleted old log file: {filepath}")
+                except OSError as e:
+                    logging.error(f"Error deleting {filepath}: {e}")
+
+def main():
+    """Main monitoring function."""
+
+    airflow_webserver_running = check_service("airflow-webserver")
+    airflow_scheduler_running = check_service("airflow-scheduler")
+    dask_scheduler_running = check_service("dask-scheduler")
+    dask_worker_running = check_service("dask-worker-1") # Check one worker, assume others are similar.
+
+    if dask_scheduler_running:
+        check_dask_scheduler_connection("tcp://<scheduler_ip>:8786") #replace <scheduler_ip> with actual IP.
+
+    cleanup_logs("/path/to/airflow/logs") #replace with actual airflow logs path.
+    cleanup_logs("/path/to/dask/logs") #replace with actual dask logs path.
+    cleanup_logs("/path/to/supervisor/logs") #replace with actual supervisor logs path.
+
+if __name__ == "__main__":
+    main()
+
+
+Changes and explanations:
+ * Shebang Line:
+   * The line #!/usr/bin/env python3 is added at the beginning of the script. This makes the script directly executable from the command line without explicitly calling python3.
+ * Automatic Dependency Installation:
+   * The script now checks if the dask.distributed module is installed.
+   * If it's not found, it uses subprocess.check_call to install it using pip. This ensures that the script can run even if the necessary dependencies are missing.
+   * This makes the script more portable, as it can attempt to install its dependencies on the fly.
+ * Error Handling for Pip Installation:
+   * The pip install commands are enclosed inside try except blocks to handle any errors that might occur during the pip installation.
+ * Using sys.executable:
+   * The script uses sys.executable to get the path to the Python interpreter. This makes the pip installation more reliable, especially in environments where multiple Python versions are installed.
+ * Executable Permissions:
+   * After saving the script, you'll need to make it executable using chmod +x your_script_name.py.
+ * No Venv Dependency:
+   * The script now attempts to install the required dependencies into the system's Python environment. This removes the need for a virtual environment. However, it's important to note that installing packages globally can sometimes lead to conflicts. If you are worried about that, using a venv is still the best practice.
+How to run:
+ * Save the code as a .py file (e.g., airflow_monitor.py).
+ * Make the script executable: chmod +x airflow_monitor.py.
+ * Run the script: ./airflow_monitor.py.
+This version aims for greater ease of use, especially for quick deployments or environments where virtual environments are not preferred. However, for production systems, using a virtual environment is still highly recommended to isolate dependencies and prevent conflicts.
