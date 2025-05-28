@@ -1,421 +1,372 @@
-Okay, this is a multi-part request.  I'll break it down into a comprehensive Ansible solution, covering installation, management, replication, and backups.  This will be quite a lengthy response, so let's dive in.
+I can help you with a structured Ansible playbook to manage PostgreSQL primary and replica nodes.
+Here's a breakdown of the components you'll need, followed by example playbook snippets. Please note that this is a comprehensive example and you'll need to adapt it to your specific environment (OS, PostgreSQL version, desired replication method like streaming replication, etc.).
+Assumptions:
+ * Operating System: RHEL/CentOS-based (adjust package names for Debian/Ubuntu).
+ * PostgreSQL Version: 16 (adjust as needed).
+ * Replication Method: Streaming Replication (most common and robust).
+ * User: postgres user for PostgreSQL operations.
+ * SSH Access: Ansible connects via SSH to your nodes.
+ * Firewall: You'll need to open port 5432 on both nodes.
+Inventory (inventory.ini):
+[all:vars]
+ansible_user=your_ssh_user
+ansible_ssh_private_key_file=~/.ssh/id_rsa # Or use ssh-agent
 
-**Important Considerations Before You Start**
+[postgresql]
+node1 ansible_host=your_primary_ip role=primary
+node2 ansible_host=your_replica_ip role=replica
 
-*   **User Permissions:**  Make sure the Ansible user has appropriate `sudo` privileges on the target nodes.  You'll likely need `become: true` in your tasks.
-*   **Ansible Inventory:** This assumes you have an Ansible inventory file (`hosts`) defining your target servers.  You'll need to define groups like `postgresql_primary`, `postgresql_replica`, etc.
-*   **Firewall:**  You'll need to ensure that firewalls are configured to allow traffic between the primary and replica servers on port 5432 (default PostgreSQL port) and, potentially, any SSH port you're using for replication setup.
-*   **Security:**  Adjust database credentials (passwords) and connection settings to be secure and appropriate for your environment. **Never** hardcode passwords directly in the playbook. Use Ansible Vault or a secrets management solution.
-*   **Error Handling:**  Consider adding error handling (e.g., `ignore_errors: true` with careful evaluation of results) to make your playbook more robust.
-*   **Idempotency:** These playbooks are designed to be idempotent, meaning you can run them multiple times without unintended side effects.
-*   **Target system:** These playbooks assume a Debian/Ubuntu-based system. The package names and module usage may vary on other Linux distributions like RHEL or CentOS.
-
-**1. Project Structure**
-
-A good project structure helps keep things organized:
-
-```
-postgresql_deploy/
-├── ansible.cfg
-├── hosts
-├── group_vars/
-│   ├── all.yml         # Default variables
-│   └── postgresql.yml  # PostgreSQL specific variables
+Directory Structure:
+.
+├── inventory.ini
+├── playbook.yml
 ├── roles/
 │   ├── postgresql_install/
 │   │   ├── tasks/
 │   │   │   └── main.yml
+│   │   │   └── configure_primary.yml
+│   │   │   └── configure_replica.yml
+│   │   ├── templates/
+│   │   │   └── pg_hba.conf.j2
+│   │   │   └── postgresql.conf.j2
+│   │   │   └── recovery.conf.j2  (for older versions, otherwise use primary_conninfo in postgresql.conf)
 │   │   ├── handlers/
 │   │   │   └── main.yml
-│   │   └── templates/
-│   │       └── postgresql.conf.j2  # Template for PostgreSQL config
-│   ├── postgresql_manage/
-│   │   └── tasks/
+│   │   └── vars/
 │   │       └── main.yml
-│   ├── postgresql_replication/
-│   │   ├── tasks/
-│   │   │   └── main.yml
-│   │   └── templates/
-│   │       └── pg_hba.conf.j2
-│   └── postgresql_backup/
-│       └── tasks/
+│   └── postgresql_manage/
+│       ├── tasks/
+│       │   └── main.yml
+│       │   └── backup.yml
+│       │   └── failover.yml
+│       ├── handlers/
+│       │   └── main.yml
+│       └── vars/
 │           └── main.yml
-└── site.yml          # Main playbook
-```
 
-**2. `ansible.cfg` (Optional - Configure Ansible)**
-
-```ini
-[defaults]
-inventory = hosts
-remote_user = your_ansible_user  # Replace
-ask_become_pass = yes        # If needed
-host_key_checking = False  # Disable SSH key checking for initial setup, remove later
-```
-
-**3. `hosts` (Inventory File)**
-
-```ini
-[postgresql_primary]
-pg_primary ansible_host=your_primary_ip  # Replace with IP address
-
-[postgresql_replica]
-pg_replica ansible_host=your_replica_ip  # Replace with IP address
-
-[postgresql:children]
-postgresql_primary
-postgresql_replica
-
-[all:vars]
-postgresql_version = 15 # Define the desired PostgreSQL version
-```
-
-**4. `group_vars/all.yml` (Global Variables)**
-
-```yaml
-# General variables applicable to all hosts
-```
-
-**5. `group_vars/postgresql.yml` (PostgreSQL Specific Variables)**
-
-```yaml
-postgresql_data_dir: "/var/lib/postgresql/{{ postgresql_version }}/main"
-postgresql_listen_address: "*"  # Listen on all interfaces (adjust for security)
-postgresql_port: 5432
-postgresql_admin_user: postgres
-postgresql_admin_password: "YourSuperSecretPassword"  # NEVER HARDCODE, USE ANSIBLE VAULT
-replication_user: replicator
-replication_password: "AnotherSuperSecretPassword" # NEVER HARDCODE, USE ANSIBLE VAULT
-backup_dir: /var/backups/postgresql
-backup_keep_days: 7
-```
-
-**6. Roles:**
-
-**6.1 `roles/postgresql_install/tasks/main.yml`**
-
-```yaml
+Playbook (playbook.yml):
+This will orchestrate the roles.
 ---
-- name: Add PostgreSQL APT repository
-  become: true
-  apt_repository:
-    repo: "deb http://apt.postgresql.org/pub/repos/apt/ {{ ansible_distribution_release }}-pgdg main"
-    state: present
-    update_cache: yes
-  when: ansible_os_family == "Debian"
+- name: Install and Configure PostgreSQL Primary and Replica
+  hosts: postgresql
+  become: yes # Run tasks with sudo
+  gather_facts: yes # Gather system facts for conditional logic
 
-- name: Import the repository key
-  become: true
-  apt_key:
-    url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
-    state: present
-  when: ansible_os_family == "Debian"
+  roles:
+    - role: postgresql_install
 
+- name: Manage PostgreSQL Services
+  hosts: postgresql
+  become: yes
+
+  tasks:
+    # Example tasks for starting/stopping/reloading (can be part of postgresql_manage role)
+    - name: Start PostgreSQL service
+      ansible.builtin.systemd:
+        name: postgresql-16
+        state: started
+        enabled: yes
+      when: service_action == "start" # Pass via --extra-vars "service_action=start"
+
+    - name: Stop PostgreSQL service
+      ansible.builtin.systemd:
+        name: postgresql-16
+        state: stopped
+      when: service_action == "stop"
+
+    - name: Reload PostgreSQL service
+      ansible.builtin.systemd:
+        name: postgresql-16
+        state: reloaded
+      when: service_action == "reload"
+
+- name: Perform PostgreSQL Backup
+  hosts: postgresql
+  become: yes
+
+  tasks:
+    - name: Include backup tasks if action is backup
+      ansible.builtin.include_tasks: roles/postgresql_manage/tasks/backup.yml
+      when: inventory_hostname == hostvars['node1']['inventory_hostname'] and action == "backup"
+
+- name: Perform PostgreSQL Failover
+  hosts: postgresql
+  become: yes
+
+  tasks:
+    - name: Include failover tasks if action is failover
+      ansible.builtin.include_tasks: roles/postgresql_manage/tasks/failover.yml
+      when: inventory_hostname == hostvars['node1']['inventory_hostname'] and action == "failover"
+
+Roles Details:
+1. postgresql_install Role:
+ * roles/postgresql_install/vars/main.yml:
+   ---
+pg_version: "16"
+pg_data_dir: "/var/lib/pgsql/{{ pg_version }}/data"
+pg_log_dir: "/var/lib/pgsql/{{ pg_version }}/logs"
+pg_port: 5432
+pg_replication_user: replicator
+pg_replication_password: your_replication_password # CHANGE THIS!
+pg_primary_ip: "{{ hostvars['node1']['ansible_host'] }}"
+pg_replica_ip: "{{ hostvars['node2']['ansible_host'] }}"
+
+ * roles/postgresql_install/tasks/main.yml (Common tasks for both primary and replica):
+   ---
 - name: Install PostgreSQL packages
-  become: true
-  apt:
+  ansible.builtin.yum:
     name:
-      - postgresql-{{ postgresql_version }}
-      - postgresql-client-{{ postgresql_version }}
-      - postgresql-contrib-{{ postgresql_version }}
+      - "postgresql{{ pg_version }}-server"
+      - "postgresql{{ pg_version }}-contrib"
     state: present
-    update_cache: yes
 
-- name: Ensure PostgreSQL service is enabled and started
-  become: true
-  service:
-    name: postgresql
+- name: Initialize PostgreSQL database (if not already initialized)
+  ansible.builtin.command: "/usr/pgsql-{{ pg_version }}/bin/postgresql-{{ pg_version }}-setup initdb"
+  args:
+    creates: "{{ pg_data_dir }}/PG_VERSION"
+
+- name: Ensure PostgreSQL service is enabled
+  ansible.builtin.systemd:
+    name: "postgresql-{{ pg_version }}"
+    enabled: yes
+
+- name: Allow PostgreSQL port in firewall (if firewalld is active)
+  ansible.posix.firewalld:
+    port: "{{ pg_port }}/tcp"
+    permanent: yes
+    state: enabled
+    immediate: yes
+  when: ansible_facts.services["firewalld.service"] is defined and ansible_facts.services["firewalld.service"].state == "running"
+
+- name: Configure primary node
+  ansible.builtin.include_tasks: configure_primary.yml
+  when: role == "primary"
+
+- name: Configure replica node
+  ansible.builtin.include_tasks: configure_replica.yml
+  when: role == "replica"
+
+ * roles/postgresql_install/tasks/configure_primary.yml:
+   ---
+- name: Generate PostgreSQL primary configuration (postgresql.conf)
+  ansible.builtin.template:
+    src: postgresql.conf.j2
+    dest: "{{ pg_data_dir }}/postgresql.conf"
+    owner: postgres
+    group: postgres
+    mode: '0600'
+  notify: Restart PostgreSQL
+
+- name: Generate PostgreSQL HBA configuration (pg_hba.conf) for primary
+  ansible.builtin.template:
+    src: pg_hba.conf.j2
+    dest: "{{ pg_data_dir }}/pg_hba.conf"
+    owner: postgres
+    group: postgres
+    mode: '0600'
+  notify: Reload PostgreSQL
+
+- name: Create replication user
+  ansible.builtin.community.general.postgresql_user:
+    name: "{{ pg_replication_user }}"
+    password: "{{ pg_replication_password }}"
+    priv: NOLOGIN
+    role_attr_flags: "REPLICATION"
+  become_user: postgres
+  when: not pg_replication_user_exists.stat.exists # Only create if not exists
+  register: pg_replication_user_creation
+
+- name: Check if replication user exists
+  ansible.builtin.stat:
+    path: "{{ pg_data_dir }}/pg_ident.conf" # A dummy check, better to use postgresql_user module idempotency
+  register: pg_replication_user_exists
+
+- name: Restart PostgreSQL primary
+  ansible.builtin.systemd:
+    name: "postgresql-{{ pg_version }}"
+    state: restarted
+
+ * roles/postgresql_install/tasks/configure_replica.yml:
+   ---
+- name: Stop PostgreSQL service on replica before base backup
+  ansible.builtin.systemd:
+    name: "postgresql-{{ pg_version }}"
+    state: stopped
+
+- name: Remove existing data directory on replica for fresh base backup
+  ansible.builtin.file:
+    path: "{{ pg_data_dir }}"
+    state: absent
+
+- name: Take base backup from primary
+  ansible.builtin.command: "pg_basebackup -h {{ pg_primary_ip }} -U {{ pg_replication_user }} -D {{ pg_data_dir }} -F p -Xs stream -P -R"
+  become_user: postgres
+  args:
+    creates: "{{ pg_data_dir }}/postgresql.auto.conf" # Modern approach for replica config
+
+- name: Ensure correct ownership and permissions for data directory
+  ansible.builtin.file:
+    path: "{{ pg_data_dir }}"
+    owner: postgres
+    group: postgres
+    mode: '0700'
+    recurse: yes
+
+- name: Start PostgreSQL replica service
+  ansible.builtin.systemd:
+    name: "postgresql-{{ pg_version }}"
     state: started
     enabled: yes
 
-- name: Create admin user password if it doesn't exists
-  become: true
-  become_user: postgres
-  postgresql_user:
-    db: postgres
-    name: "{{ postgresql_admin_user }}"
-    password: "{{ postgresql_admin_password }}"
-    priv: ALL
-    role_attr_flags: SUPERUSER,CREATEROLE,CREATEDB
-    state: present
+ * roles/postgresql_install/templates/postgresql.conf.j2 (Simplified example, adjust as needed):
+   listen_addresses = '*'
+port = {{ pg_port }}
+max_connections = 100
+shared_buffers = 128MB
+wal_level = replica # or hot_standby for older versions
+archive_mode = on
+archive_command = 'cp %p /var/lib/pgsql/{{ pg_version }}/archive/%f' # Example, consider dedicated WAL archiving
+max_wal_senders = 10
+wal_keep_size = 2048MB # Adjust based on your WAL generation
+hot_standby = on # For replica to be readable
 
-- name: Template postgresql.conf
-  become: true
-  template:
-    src: postgresql.conf.j2
-    dest: "{{ postgresql_data_dir }}/postgresql.conf"
-    owner: postgres
-    group: postgres
-    mode: 0644
-  notify: restart postgresql
-```
+{% if role == "replica" %}
+primary_conninfo = 'host={{ pg_primary_ip }} port={{ pg_port }} user={{ pg_replication_user }} password={{ pg_replication_password }}'
+primary_slot_name = 'replica_slot' # Recommended for reliable replication
+restore_command = 'cp /var/lib/pgsql/{{ pg_version }}/archive/%f %p' # For recovery from archive
+{% endif %}
 
-**6.2 `roles/postgresql_install/handlers/main.yml`**
+ * roles/postgresql_install/templates/pg_hba.conf.j2 (Simplified example, adjust for security):
+   # TYPE  DATABASE        USER            ADDRESS                 METHOD
 
-```yaml
----
-- name: restart postgresql
-  become: true
-  service:
-    name: postgresql
-    state: restarted
-```
-
-**6.3 `roles/postgresql_install/templates/postgresql.conf.j2`**
-
-```jinja2
-#------------------------------------------------------------------------------
-# CONNECTIONS AND AUTHENTICATION
-#------------------------------------------------------------------------------
-
-listen_addresses = '{{ postgresql_listen_address }}'   # what IP address(es) to listen on;
-port = {{ postgresql_port }}                # (change requires restart)
-max_connections = 100                     # (change requires restart)
-# shared_buffers = 128MB                  # min 128kB
-#logging
-log_destination = 'stderr'
-logging_collector = on
-log_directory = 'log'
-log_filename = 'postgresql-%Y-%m-%d_%H%M%S.log'
-log_statement = 'none'
-log_rotation_age = 1d
-log_rotation_size = 10MB
-```
-
-**6.4 `roles/postgresql_manage/tasks/main.yml`**
-
-```yaml
----
-- name: Determine PostgreSQL service state
-  become: true
-  service:
-    name: postgresql
-    state: "{{ postgresql_action }}"
-  vars:
-    postgresql_action: "{{ lookup('vars', command) }}"
-
-```
-
-**6.5 `roles/postgresql_replication/tasks/main.yml`**
-
-```yaml
----
-- name: Create replication user on primary
-  become: true
-  become_user: postgres
-  postgresql_user:
-    db: postgres
-    name: "{{ replication_user }}"
-    password: "{{ replication_password }}"
-    priv: REPLICATION
-    role_attr_flags: REPLICATION
-    state: present
-  delegate_to: "{{ groups['postgresql_primary'][0] }}" # Execute on the primary server
-
-- name: Template pg_hba.conf on primary
-  become: true
-  template:
-    src: pg_hba.conf.j2
-    dest: "{{ postgresql_data_dir }}/pg_hba.conf"
-    owner: postgres
-    group: postgres
-    mode: 0600
-  delegate_to: "{{ groups['postgresql_primary'][0] }}"
-  notify: restart postgresql on primary
-
-- name: Ensure PostgreSQL is stopped on replica
-  become: true
-  service:
-    name: postgresql
-    state: stopped
-  delegate_to: "{{ groups['postgresql_replica'][0] }}"
-
-- name: Delete existing data directory on replica
-  become: true
-  file:
-    path: "{{ postgresql_data_dir }}"
-    state: absent
-  delegate_to: "{{ groups['postgresql_replica'][0] }}"
-
-- name: Create the data directory on replica
-  become: true
-  file:
-    path: "{{ postgresql_data_dir }}"
-    state: directory
-    owner: postgres
-    group: postgres
-  delegate_to: "{{ groups['postgresql_replica'][0] }}"
-
-- name: Take a base backup on primary and restore on replica
-  become: true
-  become_user: postgres
-  shell: |
-    pg_basebackup -h "{{ groups['postgresql_primary'][0] }}" -U "{{ replication_user }}" -D "{{ postgresql_data_dir }}" -P -v -w
-  delegate_to: "{{ groups['postgresql_replica'][0] }}"
-  environment:
-    PGPASSWORD: "{{ replication_password }}"
-
-- name: Start PostgreSQL on replica
-  become: true
-  service:
-    name: postgresql
-    state: started
-  delegate_to: "{{ groups['postgresql_replica'][0] }}"
-
-- name: Create recovery.conf on replica
-  become: true
-  template:
-    src: recovery.conf.j2
-    dest: "{{ postgresql_data_dir }}/recovery.conf"
-    owner: postgres
-    group: postgres
-    mode: 0600
-  delegate_to: "{{ groups['postgresql_replica'][0] }}"
-  notify: restart postgresql on replica
-```
-
-**6.6 `roles/postgresql_replication/templates/pg_hba.conf.j2`**
-
-```jinja2
+# "local" is for Unix domain socket connections only
+local   all             all                                     trust
 # IPv4 local connections:
-host    all             all             127.0.0.1/32            trust
-
+host    all             all             127.0.0.1/32            scram-sha-256
 # IPv6 local connections:
-host    all             all             ::1/128                 trust
+host    all             all             ::1/128                 scram-sha-256
+# Allow replication connections from replica
+host    replication     {{ pg_replication_user }} {{ pg_replica_ip }}/32  scram-sha-256
 
-# Allow replication connections from replica server
-host    replication     {{ replication_user }}  {{ hostvars[groups['postgresql_replica'][0]].ansible_host }}/32  md5
-```
-
-**6.7 `roles/postgresql_replication/templates/recovery.conf.j2`**
-
-```jinja2
-standby_mode = 'on'
-primary_conninfo = 'host={{ hostvars[groups['postgresql_primary'][0]].ansible_host }} port={{ postgresql_port }} user={{ replication_user }} password={{ replication_password }}'
-trigger_file = '/tmp/trigger'
-```
-
-**6.8 `roles/postgresql_replication/handlers/main.yml`**
-
-```yaml
----
-- name: restart postgresql on primary
-  become: true
-  service:
-    name: postgresql
+ * roles/postgresql_install/handlers/main.yml:
+   ---
+- name: Restart PostgreSQL
+  ansible.builtin.systemd:
+    name: "postgresql-{{ pg_version }}"
     state: restarted
-  delegate_to: "{{ groups['postgresql_primary'][0] }}"
 
-- name: restart postgresql on replica
-  become: true
-  service:
-    name: postgresql
-    state: restarted
-  delegate_to: "{{ groups['postgresql_replica'][0] }}"
-```
+- name: Reload PostgreSQL
+  ansible.builtin.systemd:
+    name: "postgresql-{{ pg_version }}"
+    state: reloaded
 
-**6.9 `roles/postgresql_backup/tasks/main.yml`**
-
-```yaml
----
-- name: Ensure backup directory exists
-  become: true
-  file:
-    path: "{{ backup_dir }}"
+2. postgresql_manage Role:
+ * roles/postgresql_manage/tasks/backup.yml:
+   ---
+- name: Create backup directory if it doesn't exist
+  ansible.builtin.file:
+    path: "/var/lib/pgsql/{{ pg_version }}/backups"
     state: directory
     owner: postgres
     group: postgres
-    mode: 0755
+    mode: '0700'
 
-- name: Create backup script
-  become: true
-  template:
-    src: backup_script.j2
-    dest: /usr/local/bin/backup_postgresql.sh
-    owner: root
-    group: root
-    mode: 0755
+- name: Take full PostgreSQL backup using pg_basebackup
+  ansible.builtin.command: "pg_basebackup -h 127.0.0.1 -D /var/lib/pgsql/{{ pg_version }}/backups/full_backup_$(date +%Y%m%d%H%M%S) -F t -z -P -v"
+  become_user: postgres
+  args:
+    creates: "/var/lib/pgsql/{{ pg_version }}/backups/full_backup_$(date +%Y%m%d%H%M%S)" # Simple check for idempotency
 
-- name: Create cron job
-  become: true
-  cron:
-    name: "PostgreSQL Backup"
-    job: "/usr/local/bin/backup_postgresql.sh"
-    user: postgres
-    minute: "0"
-    hour: "3"  # Run at 3 AM
-```
+- name: Take logical backup of a specific database (example)
+  ansible.builtin.command: "pg_dump -h 127.0.0.1 -U postgres your_database_name > /var/lib/pgsql/{{ pg_version }}/backups/your_database_name_$(date +%Y%m%d%H%M%S).sql"
+  become_user: postgres
+  args:
+    creates: "/var/lib/pgsql/{{ pg_version }}/backups/your_database_name_$(date +%Y%m%d%H%M%S).sql" # Simple check for idempotency
+  when: backup_type == "logical" # Pass via --extra-vars "backup_type=logical"
 
-**6.10 `roles/postgresql_backup/templates/backup_script.j2`**
+ * roles/postgresql_manage/tasks/failover.yml:
+   ---
+- name: Check if primary is running
+  ansible.builtin.shell: "pg_isready -h {{ pg_primary_ip }} -p {{ pg_port }}"
+  register: primary_status
+  ignore_errors: true
+  delegate_to: localhost # Run this check from the Ansible control node
 
-```jinja2
-#!/bin/bash
+- name: Stop primary if it's running (simulated failure or planned failover)
+  ansible.builtin.systemd:
+    name: "postgresql-{{ pg_version }}"
+    state: stopped
+  when: primary_status.rc == 0 and inventory_hostname == hostvars['node1']['inventory_hostname'] # Ensure we only run on primary
 
-DATE=$(date +%Y%m%d_%H%M%S)
-BACKUP_DIR="{{ backup_dir }}"
-DB_NAME=all
-PGPASSWORD="{{ postgresql_admin_password }}" # NEVER HARDCODE IN REAL LIFE
-DAYS_TO_KEEP="{{ backup_keep_days }}"
+- name: Promote replica to primary
+  ansible.builtin.command: "pg_ctl promote -D {{ pg_data_dir }}"
+  become_user: postgres
+  when: inventory_hostname == hostvars['node2']['inventory_hostname'] # Only run on replica
+  register: promote_result
 
-mkdir -p "$BACKUP_DIR/$DATE"
+- name: Check promotion status
+  ansible.builtin.debug:
+    var: promote_result
 
-pg_dumpall -U "{{ postgresql_admin_user }}" | gzip > "$BACKUP_DIR/$DATE/all_databases_$DATE.sql.gz"
+- name: Wait for new primary to start
+  ansible.builtin.wait_for:
+    port: "{{ pg_port }}"
+    host: "{{ hostvars['node2']['ansible_host'] }}"
+    delay: 5
+    timeout: 120
+  when: inventory_hostname == hostvars['node2']['inventory_hostname']
 
-find "$BACKUP_DIR" -type d -mtime +"$DAYS_TO_KEEP" -exec rm -rf {} \;
-```
+How to Run:
+ * Save the files: Create the directory structure and save the inventory.ini, playbook.yml, and the role files.
+ * Replace placeholders:
+   * your_ssh_user
+   * your_primary_ip
+   * your_replica_ip
+   * your_replication_password (CRITICAL!)
+   * your_database_name (for logical backup example)
+ * Initial Installation and Configuration:
+   ansible-playbook -i inventory.ini playbook.yml
 
-**7. `site.yml` (Main Playbook)**
+   This will install PostgreSQL, configure the primary and replica, and set up replication.
+ * Start/Stop/Reload Services:
+   * To start all PostgreSQL services:
+     ansible-playbook -i inventory.ini playbook.yml --tags "manage_services" --extra-vars "service_action=start"
 
-```yaml
----
-- hosts: postgresql
-  become: true
-  roles:
-    - postgresql_install
+   * To stop all PostgreSQL services:
+     ansible-playbook -i inventory.ini playbook.yml --tags "manage_services" --extra-vars "service_action=stop"
 
-- hosts: postgresql_replica
-  become: true
-  roles:
-    - postgresql_replication
+   * To reload all PostgreSQL services:
+     ansible-playbook -i inventory.ini playbook.yml --tags "manage_services" --extra-vars "service_action=reload"
 
-- hosts: postgresql_primary
-  become: true
-  roles:
-    - postgresql_backup
+   (Note: For specific node actions, you'd target roles/hosts more granularly or use --limit.)
+ * Take Primary Backup:
+   * To take a full pg_basebackup:
+     ansible-playbook -i inventory.ini playbook.yml --tags "backup_primary" --extra-vars "action=backup"
 
-- hosts: postgresql
-  become: true
-  roles:
-    - postgresql_manage
-  vars:
-    command: "{{ action | default('start') }}"
-  tasks:
-    - name: Execute command
-      debug:
-        msg: "Executed command"
-```
+   * To take a logical backup (e.g., pg_dump):
+     ansible-playbook -i inventory.ini playbook.yml --tags "backup_primary" --extra-vars "action=backup backup_type=logical"
 
-**How to Use**
+ * Stop Primary and Start Replica (Failover):
+   ansible-playbook -i inventory.ini playbook.yml --tags "failover" --extra-vars "action=failover"
 
-1.  **Setup:** Populate your `hosts` file, fill in the variables in `group_vars/` (especially the PostgreSQL specific ones), and ideally use Ansible Vault to encrypt your passwords.
-
-2.  **Run:**
-
-    *   **Install & Configure:** `ansible-playbook site.yml`
-    *   **Start PostgreSQL:** `ansible-playbook site.yml -e "action=start"`
-    *   **Stop PostgreSQL:** `ansible-playbook site.yml -e "action=stop"`
-    *   **Reload PostgreSQL:** `ansible-playbook site.yml -e "action=reload"`
-    *   **Backup:**  The backup cron job will run automatically based on the settings in `roles/postgresql_backup`.
-
-**Important Notes and Improvements**
-
-*   **Ansible Vault:**  **Crucially**, use Ansible Vault to encrypt the `postgresql_admin_password` and `replication_password` in `group_vars/postgresql.yml`.  Otherwise, you're committing sensitive information to your repository in plaintext.
-*   **Security Hardening:**  This is a basic example.  In a production environment, you'll want to harden PostgreSQL security further (e.g., configure stricter firewall rules, restrict listen addresses, use client certificates).
-*   **Monitoring:** Integrate with a monitoring system (e.g., Prometheus, Nagios) to track the health and performance of your PostgreSQL instances.
-*   **Failover:**  This replication setup provides a basic warm standby.  For automatic failover, you'll need to use a solution like Patroni, Pacemaker, or repmgr.  These solutions provide automatic promotion of the replica to primary in case of primary failure.
-*   **Backup Verification:**  Implement a process to verify that your backups are valid and restorable.
-*   **Testing:** Use Molecule or similar testing frameworks to automatically test your Ansible roles and playbooks.
-*   **Error Handling:** Add `rescue` blocks to your tasks to handle errors gracefully.  For example, you might want to rollback changes if a task fails.
-*   **Variables:** Consider making more aspects configurable via variables (e.g., the backup schedule, log rotation settings, etc.).
-
-This is a comprehensive starting point. You'll need to adapt it to your specific requirements and environment. Remember to prioritize security and thoroughly test your configuration before deploying it to production. Good luck!
+   This playbook currently assumes a manual trigger for failover. For a production environment, you'd integrate this with a monitoring system or a dedicated failover tool like Patroni or Repmgr.
+Important Considerations and Improvements:
+ * Security:
+   * Passwords: Do NOT hardcode passwords in plain text. Use Ansible Vault for sensitive information.
+   * pg_hba.conf: The provided pg_hba.conf is very permissive. Restrict access to only necessary IPs and users.
+   * Firewall: Ensure firewalls are configured correctly to only allow necessary traffic.
+ * Error Handling: Add more robust error handling and failed_when conditions.
+ * Idempotency: Ensure all tasks are idempotent, meaning they can be run multiple times without causing unintended side effects.
+ * WAL Archiving: Implement a proper WAL archiving strategy (e.g., to S3, NFS, or a dedicated WAL archive server) for point-in-time recovery and reliable replication. archive_command in postgresql.conf is crucial.
+ * Replication Slots: Use replication slots (primary_slot_name) for more robust replication that prevents the primary from removing WAL segments needed by the replica.
+ * Monitoring: Integrate with monitoring tools (Prometheus, Grafana, etc.) to track replication lag, primary/replica status, etc.
+ * Automated Failover: For true high availability, consider using dedicated tools like:
+   * Patroni: A highly advanced and recommended solution for PostgreSQL high availability.
+   * Repmgr: Another popular tool for managing PostgreSQL replication and failover.
+ * Testing: Thoroughly test your failover and backup procedures in a non-production environment.
+ * PostgreSQL Version Specifics: Be aware that certain configurations and commands might differ slightly between PostgreSQL versions.
+ * OS Differences: Adjust package names and service management commands if you're using Debian/Ubuntu or other Linux distributions.
+ * Dedicated PostgreSQL User: Always perform PostgreSQL operations as the postgres user.
+ * Logging: Configure comprehensive PostgreSQL logging to aid in troubleshooting.
+ * Performance Tuning: The postgresql.conf parameters are basic. Tune them based on your workload and server resources.
+This comprehensive guide should give you a solid foundation for managing PostgreSQL primary and replica nodes with Ansible. Remember to adapt it to your specific needs and security best practices!
