@@ -1,12 +1,17 @@
-Okay, let's combine the postgresql_install and postgresql_manage roles into a single, comprehensive postgresql role. This makes your Ansible project more concise for managing a single application like PostgreSQL.
-Updated Directory Structure
+Okay, let's adapt the Ansible code for compatibility with Ansible 2.9.27.
+The main changes involve:
+ * Module Names: In Ansible 2.9, it was common practice to use shorter module names (e.g., file instead of ansible.builtin.file, postgresql_db instead of community.general.postgresql_db). While FQCNs (Fully Qualified Collection Names) might sometimes work if collections are installed, using the shorter names is more idiomatic for 2.9.
+ * collections Keyword: If you're using modules from collections (like community.general for PostgreSQL modules), it's good practice in 2.9 to specify them using the collections keyword in your playbook. This ensures Ansible knows where to find them.
+ * Lookup Plugins: Similar to modules, lookup plugins often didn't require the ansible.builtin. prefix in 2.9. For hashi_vault, it's typically provided by the community.hashi_vault collection, so we'll adjust the lookup syntax accordingly.
+Here's the updated code:
+Directory Structure (No Change)
 .
 ├── inventory.ini
-├── playbook.yml            # Main playbook to call the single role
+├── playbook.yml
 └── roles/
-    └── postgresql/         # Combined PostgreSQL role
+    └── postgresql/
         ├── tasks/
-        │   └── main.yml      # All PostgreSQL tasks
+        │   └── main.yml
         ├── templates/
         │   ├── pg_hba.conf.j2
         │   ├── postgresql.conf.j2
@@ -16,92 +21,82 @@ Updated Directory Structure
         └── vars/
             └── main.yml
 
-Consolidated File Contents
+Consolidated File Contents (Updated for Ansible 2.9.27)
 inventory.ini (No Change)
 # inventory.ini
 [postgresql]
 Apphost1 role=primary
 Apphost2 role=replica
 
-playbook.yml (Simplified Entry Point)
+playbook.yml (Updated with collections keyword)
 ---
 - name: PostgreSQL Installation and Management
-  hosts: postgresql # Targets both Apphost1 and Apphost2 from your inventory
+  hosts: postgresql
   become: yes
 
-  # Define common variables here if you prefer, or pass them via --extra-vars
-  # primary_db_address: "Apphost1" # Example: if you need to define primary address outside role vars
+  # Declare the collections needed for PostgreSQL modules and HashiCorp Vault lookup
+  collections:
+    - community.general
+    - community.hashi_vault # Assuming this collection provides the hashi_vault lookup in your 2.9 setup
 
   roles:
-    # Call the single combined PostgreSQL role
     - role: postgresql
-      # Tags can still be used to filter specific parts of the combined role if desired
       tags:
         - postgresql_management
 
-roles/postgresql/vars/main.yml (Combined Variables)
+roles/postgresql/vars/main.yml (Updated lookup syntax)
 # roles/postgresql/vars/main.yml
 pg_data_dir: "/data/local/arcol/airflow/pgdata"
-pg_install_dir: "/efs/dist/postgresql/core/14.10" # Path to EFS mounted PostgreSQL binaries
+pg_install_dir: "/efs/dist/postgresql/core/14.10"
 database_name: "airflowdb"
 replication_user: "replication_user"
 airflow_user: "airflow_user"
 
-# Template paths relative to the role's templates/ directory
 pg_hba_conf_template: "pg_hba.conf.j2"
 postgresql_conf_template: "postgresql.conf.j2"
 pgpass_template: "pgpass.j2"
 
-# Main action variable to control what tasks are run within this role
-# Default to 'status', user can override with --extra-vars "pg_action=install_base" etc.
 pg_action: "status"
-
-# Variable to define which role to target for actions (e.g., 'primary', 'replica', or 'all' for both)
-# Default to 'all' meaning tasks will run based on host's inventory 'role' if target_role is not specified.
 target_role: "all"
 
-# PostgreSQL service name (adjust for your OS/version and EFS setup's systemd integration)
 pg_service_name: postgresql-14
 
-# These should be retrieved securely (e.g., from Ansible Vault or HashiCorp Vault)
-# Make sure your Ansible environment is configured to retrieve these secrets.
-pg_replication_pwd: "{{ lookup('ansible.builtin.hashi_vault', 'secret=field-pg_replication_pwd_devops:value') }}"
-pg_airflow_pwd: "{{ lookup('ansible.builtin.hashi_vault', 'secret=field-pg_airflow_pwd_devops:value') }}"
+# Updated lookup syntax for Ansible 2.9
+# This assumes community.hashi_vault collection is installed and active.
+pg_replication_pwd: "{{ lookup('hashi_vault', 'secret=field-pg_replication_pwd_devops:value') }}"
+pg_airflow_pwd: "{{ lookup('hashi_vault', 'secret=field-pg_airflow_pwd_devops:value') }}"
 
-# Define primary_db_address here if it's dynamic, or set a static value.
-# Used for replica configuration and pg_hba.conf templates.
-primary_db_address: "Apphost1" # Example: Assumes Apphost1 is always the primary
+primary_db_address: "Apphost1"
 
-roles/postgresql/tasks/main.yml (All Combined Tasks)
-This file will now contain all installation, configuration, and management tasks. The pg_action variable will control the flow.
+roles/postgresql/tasks/main.yml (Updated Module Names)
 # roles/postgresql/tasks/main.yml
 # All PostgreSQL related tasks are combined here.
 # Execution is controlled by 'pg_action' and 'target_role' variables.
 
 # --- Common Installation & Base Configuration (pg_action: 'install_base') ---
 - name: Ensure PostgreSQL installation directory exists (on EFS share)
-  ansible.builtin.file:
+  file: # Changed from ansible.builtin.file
     path: "{{ pg_install_dir }}"
     state: directory
   when: pg_action == 'install_base'
 
 - name: Ensure PostgreSQL data directory exists
-  ansible.builtin.file:
+  file: # Changed from ansible.builtin.file
     path: "{{ pg_data_dir }}"
     state: directory
     owner: postgres
     group: postgres
     mode: '0700'
-  when: pg_action == 'install_base' or pg_action == 'configure_replica' # Replica needs data dir for base backup
+  when: pg_action == 'install_base' or pg_action == 'configure_replica'
 
 - name: Ensure postgresql service is enabled
-  ansible.builtin.systemd:
+  systemd: # Changed from ansible.builtin.systemd
     name: "{{ pg_service_name }}"
     enabled: yes
   when: pg_action == 'install_base'
 
 - name: Copy postgresql.conf from template
-  ansible.builtin.template:
+  template: # Changed from ansible.builtin.template
     src: "{{ postgresql_conf_template }}"
     dest: "{{ pg_data_dir }}/postgresql.conf"
     owner: postgres
@@ -111,7 +106,7 @@ This file will now contain all installation, configuration, and management tasks
   when: pg_action == 'install_base'
 
 - name: Copy pg_hba.conf from template
-  ansible.builtin.template:
+  template: # Changed from ansible.builtin.template
     src: "{{ pg_hba_conf_template }}"
     dest: "{{ pg_data_dir }}/pg_hba.conf"
     owner: postgres
@@ -122,7 +117,7 @@ This file will now contain all installation, configuration, and management tasks
 
 # --- Primary-Specific Configuration (pg_action: 'configure_primary') ---
 - name: Initialize PostgreSQL primary cluster if not already present
-  community.general.postgresql_cluster:
+  postgresql_cluster: # Changed from community.general.postgresql_cluster
     name: main
     cluster_owner: postgres
     data_directory: "{{ pg_data_dir }}"
@@ -132,7 +127,7 @@ This file will now contain all installation, configuration, and management tasks
   when: pg_action == 'configure_primary' and role == 'primary' and (target_role == 'all' or target_role == 'primary')
 
 - name: Create PostgreSQL database {{ database_name }} (Primary)
-  community.general.postgresql_db:
+  postgresql_db: # Changed from community.general.postgresql_db
     name: "{{ database_name }}"
     owner: "{{ airflow_user }}"
     encoding: "UTF8"
@@ -143,7 +138,7 @@ This file will now contain all installation, configuration, and management tasks
   when: pg_action == 'configure_primary' and role == 'primary' and (target_role == 'all' or target_role == 'primary')
 
 - name: Create replication user {{ replication_user }} (Primary)
-  community.general.postgresql_user:
+  postgresql_user: # Changed from community.general.postgresql_user
     name: "{{ replication_user }}"
     password: "{{ pg_replication_pwd }}"
     role_attr_flags: REPLICATION,LOGIN
@@ -152,7 +147,7 @@ This file will now contain all installation, configuration, and management tasks
   when: pg_action == 'configure_primary' and role == 'primary' and (target_role == 'all' or target_role == 'primary')
 
 - name: Grant all privileges on database to replication user (Primary)
-  community.general.postgresql_privs:
+  postgresql_privs: # Changed from community.general.postgresql_privs
     db: "{{ database_name }}"
     privs: ALL
     type: database
@@ -162,7 +157,7 @@ This file will now contain all installation, configuration, and management tasks
   when: pg_action == 'configure_primary' and role == 'primary' and (target_role == 'all' or target_role == 'primary')
 
 - name: Create Airflow user {{ airflow_user }} (Primary)
-  community.general.postgresql_user:
+  postgresql_user: # Changed from community.general.postgresql_user
     name: "{{ airflow_user }}"
     password: "{{ pg_airflow_pwd }}"
     role_attr_flags: LOGIN,PASSWORD
@@ -171,7 +166,7 @@ This file will now contain all installation, configuration, and management tasks
   when: pg_action == 'configure_primary' and role == 'primary' and (target_role == 'all' or target_role == 'primary')
 
 - name: Grant all privileges on database to Airflow user (Primary)
-  community.general.postgresql_privs:
+  postgresql_privs: # Changed from community.general.postgresql_privs
     db: "{{ database_name }}"
     privs: ALL
     type: database
@@ -182,14 +177,13 @@ This file will now contain all installation, configuration, and management tasks
 
 # --- Replica-Specific Configuration (pg_action: 'configure_replica') ---
 - name: Ensure PostgreSQL data directory on replica is clean or empty for base backup
-  ansible.builtin.file:
+  file: # Changed from ansible.builtin.file
     path: "{{ pg_data_dir }}"
     state: absent
   when: pg_action == 'configure_replica' and role == 'replica' and (target_role == 'all' or target_role == 'replica')
-  # CRITICAL: ONLY run this if you are absolutely sure you want to re-initialize a fresh replica.
 
 - name: Recreate PostgreSQL data directory on replica
-  ansible.builtin.file:
+  file: # Changed from ansible.builtin.file
     path: "{{ pg_data_dir }}"
     state: directory
     owner: postgres
@@ -198,7 +192,7 @@ This file will now contain all installation, configuration, and management tasks
   when: pg_action == 'configure_replica' and role == 'replica' and (target_role == 'all' or target_role == 'replica')
 
 - name: Create .pgpass file for passwordless authentication on replica
-  ansible.builtin.template:
+  template: # Changed from ansible.builtin.template
     src: "{{ pgpass_template }}"
     dest: "~postgres/.pgpass"
     owner: postgres
@@ -208,7 +202,7 @@ This file will now contain all installation, configuration, and management tasks
   when: pg_action == 'configure_replica' and role == 'replica' and (target_role == 'all' or target_role == 'replica')
 
 - name: Perform pg_basebackup from primary to replica
-  ansible.builtin.command: >
+  command: > # Changed from ansible.builtin.command
     {{ pg_install_dir }}/bin/pg_basebackup -h {{ primary_db_address }}
     -p 5432 -U {{ replication_user }}
     -X stream -C -D {{ pg_data_dir }} -w
@@ -220,7 +214,7 @@ This file will now contain all installation, configuration, and management tasks
   when: pg_action == 'configure_replica' and role == 'replica' and (target_role == 'all' or target_role == 'replica')
 
 - name: Create marker file after successful base backup
-  ansible.builtin.file:
+  file: # Changed from ansible.builtin.file
     path: "{{ pg_data_dir }}/basebackup.complete"
     state: touch
     owner: postgres
@@ -229,7 +223,7 @@ This file will now contain all installation, configuration, and management tasks
   when: pg_action == 'configure_replica' and role == 'replica' and (target_role == 'all' or target_role == 'replica') and not ansible_check_mode
 
 - name: Create standby.signal file for replica (PostgreSQL 12+)
-  ansible.builtin.file:
+  file: # Changed from ansible.builtin.file
     path: "{{ pg_data_dir }}/standby.signal"
     state: touch
     owner: postgres
@@ -238,7 +232,7 @@ This file will now contain all installation, configuration, and management tasks
   when: pg_action == 'configure_replica' and role == 'replica' and (target_role == 'all' or target_role == 'replica')
 
 - name: Configure primary_conninfo in postgresql.conf for replica
-  ansible.builtin.lineinfile:
+  lineinfile: # Changed from ansible.builtin.lineinfile
     path: "{{ pg_data_dir }}/postgresql.conf"
     regexp: '^#?primary_conninfo =.*'
     line: "primary_conninfo = 'host={{ primary_db_address }} port=5432 user={{ replication_user }} password={{ pg_replication_pwd }}'"
@@ -251,31 +245,31 @@ This file will now contain all installation, configuration, and management tasks
 
 # --- General Management Actions (pg_action: 'start', 'stop', 'reload', 'status') ---
 - name: Start PostgreSQL database
-  ansible.builtin.systemd:
+  systemd: # Changed from ansible.builtin.systemd
     name: "{{ pg_service_name }}"
     state: started
   when: pg_action == "start" and (target_role == 'all' or role == target_role)
 
 - name: Stop PostgreSQL database
-  ansible.builtin.systemd:
+  systemd: # Changed from ansible.builtin.systemd
     name: "{{ pg_service_name }}"
     state: stopped
   when: pg_action == "stop" and (target_role == 'all' or role == target_role)
 
 - name: Reload PostgreSQL database configuration
-  ansible.builtin.systemd:
+  systemd: # Changed from ansible.builtin.systemd
     name: "{{ pg_service_name }}"
     state: reloaded
   when: pg_action == "reload" and (target_role == 'all' or role == target_role)
 
 - name: Check PostgreSQL database status
-  ansible.builtin.command: "{{ pg_install_dir }}/bin/pg_ctl -D {{ pg_data_dir }} status"
+  command: "{{ pg_install_dir }}/bin/pg_ctl -D {{ pg_data_dir }} status" # Changed from ansible.builtin.command
   register: pg_status_output
   changed_when: false
   when: pg_action == "status" and (target_role == 'all' or role == target_role)
 
 - name: Print PostgreSQL status
-  ansible.builtin.debug:
+  debug: # Changed from ansible.builtin.debug
     var: pg_status_output.stdout_lines
   when: pg_action == "status" and (target_role == 'all' or role == target_role)
 
@@ -283,7 +277,7 @@ This file will now contain all installation, configuration, and management tasks
 - name: Perform Logical Backup (pg_dumpall)
   block:
     - name: Ensure backup directory exists
-      ansible.builtin.file:
+      file: # Changed from ansible.builtin.file
         path: "/var/backups/postgresql_logical"
         state: directory
         owner: postgres
@@ -291,7 +285,7 @@ This file will now contain all installation, configuration, and management tasks
         mode: '0700'
 
     - name: Execute pg_dumpall
-      ansible.builtin.command: >
+      command: > # Changed from ansible.builtin.command
         {{ pg_install_dir }}/bin/pg_dumpall -U postgres > /var/backups/postgresql_logical/all_databases-{{ ansible_date_time.iso8601_basic }}.sql
       become_user: postgres
       args:
@@ -300,14 +294,11 @@ This file will now contain all installation, configuration, and management tasks
 
 # --- Failover Action (pg_action: 'failover') ---
 - name: Failover Placeholder - Stop primary and promote replica
-  ansible.builtin.debug:
+  debug: # Changed from ansible.builtin.debug
     msg: "Failover logic would go here: stop current primary, promote replica, reconfigure old primary as new replica."
   when: pg_action == 'failover' and (target_role == 'all' or role == target_role)
-    # Failover logic is complex and needs careful consideration of roles.
-    # This 'when' condition is a placeholder, actual failover would be more specific.
 
-
-roles/postgresql/templates/pg_hba.conf.j2
+roles/postgresql/templates/pg_hba.conf.j2 (No Change)
 # roles/postgresql/templates/pg_hba.conf.j2
 # TYPE  DATABASE        USER            ADDRESS                 METHOD
 
@@ -323,8 +314,7 @@ host    replication     {{ replication_user }} {{ primary_db_address }}/32 scram
 host    all             {{ airflow_user }}      0.0.0.0/0               scram-sha-256
 host    {{ database_name }}     {{ airflow_user }}      0.0.0.0/0               scram-sha-256
 
-Note: Adjust 0.0.0.0/0 to specific IP ranges for security.
-roles/postgresql/templates/postgresql.conf.j2
+roles/postgresql/templates/postgresql.conf.j2 (No Change)
 # roles/postgresql/templates/postgresql.conf.j2
 # (Example, include your standard settings)
 data_directory = '{{ pg_data_dir }}'
@@ -352,53 +342,21 @@ max_connections = 100
 
 # Other settings as needed for your environment
 
-roles/postgresql/templates/pgpass.j2
+roles/postgresql/templates/pgpass.j2 (No Change)
 # roles/postgresql/templates/pgpass.j2
 # host:port:database:user:password
 # This file is used by pg_basebackup on the replica to connect to the primary without password prompt.
 {{ primary_db_address }}:5432:*:{{ replication_user }}:{{ pg_replication_pwd }}
 
-roles/postgresql/handlers/main.yml
+roles/postgresql/handlers/main.yml (Updated Module Names)
 # roles/postgresql/handlers/main.yml
 - name: Reload PostgreSQL
-  ansible.builtin.systemd:
+  systemd: # Changed from ansible.builtin.systemd
     name: "{{ pg_service_name }}"
     state: reloaded
 
 - name: Restart PostgreSQL
-  ansible.builtin.systemd:
+  systemd: # Changed from ansible.builtin.systemd
     name: "{{ pg_service_name }}"
     state: restarted
 
-How to Run with the Combined Role
-You will now always run the main playbook.yml, and use --extra-vars to control the pg_action and target_role.
-Examples:
- * To perform basic installation and config file copy on ALL PostgreSQL hosts:
-   ansible-playbook -i inventory.ini playbook.yml \
-  --extra-vars "pg_action=install_base target_role=all" \
-  --ask-vault-pass
-
- * To configure the Primary cluster (initdb, create dbs/users) on Apphost1 ONLY:
-   ansible-playbook -i inventory.ini playbook.yml \
-  --extra-vars "pg_action=configure_primary target_role=primary" \
-  --ask-vault-pass
-
- * To configure the Replica (base backup, standby.signal) on Apphost2 ONLY:
-   (Ensure primary is already running and configured for replication)
-   ansible-playbook -i inventory.ini playbook.yml \
-  --extra-vars "pg_action=configure_replica target_role=replica" \
-  --ask-vault-pass
-
- * To start PostgreSQL service on ALL hosts:
-   ansible-playbook -i inventory.ini playbook.yml \
-  --extra-vars "pg_action=start target_role=all"
-
- * To check status of PostgreSQL service on the PRIMARY ONLY:
-   ansible-playbook -i inventory.ini playbook.yml \
-  --extra-vars "pg_action=status target_role=primary"
-
- * To perform a logical backup on the PRIMARY ONLY:
-   ansible-playbook -i inventory.ini playbook.yml \
-  --extra-vars "pg_action=backup target_role=primary"
-
-This combined role simplifies your playbook structure while maintaining granular control through pg_action and target_role variables.
