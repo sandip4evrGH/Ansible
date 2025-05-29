@@ -1,4 +1,4 @@
-Okay, let's adapt the Ansible code for compatibility with Ansible 2.9.27.
+7Okay, let's adapt the Ansible code for compatibility with Ansible 2.9.27.
 The main changes involve:
  * Module Names: In Ansible 2.9, it was common practice to use shorter module names (e.g., file instead of ansible.builtin.file, postgresql_db instead of community.general.postgresql_db). While FQCNs (Fully Qualified Collection Names) might sometimes work if collections are installed, using the shorter names is more idiomatic for 2.9.
  * collections Keyword: If you're using modules from collections (like community.general for PostgreSQL modules), it's good practice in 2.9 to specify them using the collections keyword in your playbook. This ensures Ansible knows where to find them.
@@ -360,3 +360,74 @@ roles/postgresql/handlers/main.yml (Updated Module Names)
     name: "{{ pg_service_name }}"
     state: restarted
 
+You got it! With the combined postgresql role and the pg_action/target_role variables, here are the essential Ansible commands you'll use.
+Remember these key points:
+ * ansible-playbook -i inventory.ini playbook.yml: This is your base command.
+ * --extra-vars "variable=value": This is how you tell the playbook what action to perform (pg_action) and on which type of host (target_role).
+ * --ask-vault-pass: Use this if your vault secrets are encrypted.
+ * become:: The become: yes in your playbook.yml handles privilege escalation (sudo).
+Prerequisites:
+ * Ansible 2.9.27 installed.
+ * Required Collections Installed: Before running, ensure you have the necessary collections installed on your Ansible control node:
+   ansible-galaxy collection install community.general
+ansible-galaxy collection install community.hashi_vault
+
+ * EFS Share Mounted: Ensure your EFS share is mounted at /efs/dist/postgresql/core/14.10 on Apphost1 and Apphost2 and contains the PostgreSQL binaries.
+ * Vault Secrets: Ensure your HashiCorp Vault is accessible and the secrets for pg_replication_pwd and pg_airflow_pwd are configured as per your lookup plugin.
+Common Commands for PostgreSQL Management
+1. Initial Setup of PostgreSQL Instances
+This typically involves a sequence of steps to ensure the primary is ready before the replica connects.
+ * Step 1: Perform Base Installation and Common Configuration on ALL PostgreSQL Hosts.
+   This includes ensuring directories exist, service is enabled, and postgresql.conf/pg_hba.conf are copied.
+   ansible-playbook -i inventory.ini playbook.yml \
+  --extra-vars "pg_action=install_base target_role=all" \
+  --ask-vault-pass
+
+ * Step 2: Configure the Primary Specifics (initdb, users, databases) on Apphost1 ONLY.
+   ansible-playbook -i inventory.ini playbook.yml \
+  --extra-vars "pg_action=configure_primary target_role=primary" \
+  --ask-vault-pass
+
+ * Step 3: Configure the Replica Specifics (pg_basebackup, standby.signal) on Apphost2 ONLY.
+   (Ensure Apphost1 is running and configured for replication from Step 2 before running this!)
+   ansible-playbook -i inventory.ini playbook.yml \
+  --extra-vars "pg_action=configure_replica target_role=replica" \
+  --ask-vault-pass
+
+2. Service Management Commands
+ * Start PostgreSQL on ALL hosts (Primary & Replica):
+   ansible-playbook -i inventory.ini playbook.yml \
+  --extra-vars "pg_action=start target_role=all"
+
+ * Stop PostgreSQL on ALL hosts (Primary & Replica):
+   ansible-playbook -i inventory.ini playbook.yml \
+  --extra-vars "pg_action=stop target_role=all"
+
+ * Restart PostgreSQL on the PRIMARY ONLY:
+   ansible-playbook -i inventory.ini playbook.yml \
+  --extra-vars "pg_action=restart target_role=primary" # Note: 'restart' action isn't explicitly defined, 'reload' or a two-step stop/start might be needed. Let's use 'reload' if that's the intent.
+                                                   # If a full restart is needed, it's typically: stop then start.
+
+   Correction: The pg_action currently only supports start, stop, reload, status, backup, failover, install_base, configure_primary, configure_replica. If you need a direct restart action, you'd add a task for it. For now, reload is handled by a handler.
+   Revised for reload:
+   Reload PostgreSQL config on the PRIMARY ONLY:
+   ansible-playbook -i inventory.ini playbook.yml \
+  --extra-vars "pg_action=reload target_role=primary"
+
+ * Check PostgreSQL Status on the REPLICA ONLY:
+   ansible-playbook -i inventory.ini playbook.yml \
+  --extra-vars "pg_action=status target_role=replica"
+
+3. Backup Command
+ * Perform a Logical Backup (pg_dumpall) on the PRIMARY ONLY:
+   ansible-playbook -i inventory.ini playbook.yml \
+  --extra-vars "pg_action=backup target_role=primary"
+
+4. Failover Placeholder
+ * Trigger the Failover Placeholder (for primary or replica, depending on your manual logic):
+   (Note: This is a placeholder task; actual failover logic is complex and needs to be fully implemented by you.)
+   ansible-playbook -i inventory.ini playbook.yml \
+  --extra-vars "pg_action=failover target_role=all"
+  # Or: --extra-vars "pg_action=failover target_role=primary" if you want to trigger failover actions from the primary
+
+These commands give you fine-grained control over your PostgreSQL instances using the unified Ansible role.
