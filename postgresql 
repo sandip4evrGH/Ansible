@@ -1,3 +1,4 @@
+
 I can help you with a structured Ansible playbook to manage PostgreSQL primary and replica nodes.
 Here's a breakdown of the components you'll need, followed by example playbook snippets. Please note that this is a comprehensive example and you'll need to adapt it to your specific environment (OS, PostgreSQL version, desired replication method like streaming replication, etc.).
 Assumptions:
