@@ -221,3 +221,222 @@ Vault allows you to rotate secrets periodically. You can set up a policy to rota
 
 This approach ensures that Kafka credentials are securely managed and dynamically fetched from Vault, reducing the risk of hardcoding sensitive information. Let me know if you'd like further assistance!
 
+
+
+
+
+
+-------------------
+Integrating Single Sign-On (SSO) with Apache Airflow in an enterprise environment is a crucial step for enhancing security, streamlining user management, and improving the user experience. Airflow leverages Flask AppBuilder (FAB) for its web UI, and FAB provides the underlying authentication and authorization framework.
+Here's a breakdown of how to integrate SSO and manage user permissions in Airflow within an enterprise context:
+1. Choose Your SSO Provider and Airflow Authentication Backend
+Airflow (via Flask AppBuilder) supports several common SSO protocols and identity providers:
+ * LDAP/Active Directory (AD): If your enterprise uses LDAP or Microsoft Active Directory for user management, this is often the most direct integration. Airflow can authenticate users against your LDAP server.
+ * OAuth2 / OpenID Connect (OIDC): This is the modern standard for federated authentication and is highly flexible. Common providers include:
+   * Azure AD (Microsoft Entra ID): For Microsoft-centric organizations.
+   * Okta
+   * Auth0
+   * Google (for Google Workspace users)
+   * Keycloak
+   * GitHub Enterprise
+You'll need to select the backend that aligns with your enterprise's identity management system.
+2. Configure Airflow's webserver_config.py
+This is the primary file where you configure authentication and authorization for the Airflow web UI. It's usually located in your AIRFLOW_HOME directory.
+Key Configuration Parameters in webserver_config.py:
+ * AUTH_TYPE: Specifies the authentication method.
+   * AUTH_LDAP for LDAP/AD
+   * AUTH_OAUTH for OAuth/OIDC
+   * AUTH_DB for database-backed authentication (default, for local users)
+ * AUTH_ROLES_SYNC_AT_LOGIN: (Recommended) Set to True. This ensures that a user's roles are synchronized with the identity provider (LDAP groups, OAuth scopes/groups) every time they log in.
+ * AUTH_USER_REGISTRATION: Set to True if you want Airflow to automatically create a user entry in its internal database for users who successfully authenticate via SSO but don't yet exist in Airflow.
+ * AUTH_USER_REGISTRATION_ROLE: The default Airflow role (e.g., Viewer, User) assigned to newly registered users. This is important for initial access.
+ * Provider-Specific Settings: Depending on your AUTH_TYPE, you'll have additional settings:
+   * For LDAP/AD (AUTH_LDAP):
+     * AUTH_LDAP_SERVER
+     * AUTH_LDAP_SEARCH
+     * AUTH_LDAP_BIND_USER, AUTH_LDAP_BIND_PASSWORD (if needed for search)
+     * AUTH_LDAP_FIRSTNAME_FIELD, AUTH_LDAP_LASTNAME_FIELD, AUTH_LDAP_EMAIL_FIELD
+     * AUTH_LDAP_UID_FIELD
+     * AUTH_LDAP_ALLOW_SELF_SIGNED: Set to True if you have self-signed certificates, but use with caution.
+     * Crucially for Permissions: AUTH_LDAP_GROUP_FIELD, AUTH_ROLES_MAPPING
+       * AUTH_LDAP_GROUP_FIELD: The LDAP attribute that contains group information (e.g., memberOf for AD).
+       * AUTH_ROLES_MAPPING: A dictionary that maps LDAP group names to Airflow/FAB roles. This is how you assign permissions based on enterprise group membership.
+       # Example for LDAP/AD integration in webserver_config.py
+# ... (other Flask AppBuilder imports and settings) ...
+from flask_appbuilder.security.manager import AUTH_LDAP
+AUTH_TYPE = AUTH_LDAP
+
+AUTH_LDAP_SERVER = "ldap://your.ldap.server:389" # or ldaps:// for secure
+AUTH_LDAP_SEARCH = "ou=users,dc=yourdomain,dc=com"
+AUTH_LDAP_UID_FIELD = "sAMAccountName" # or 'uid' for standard LDAP
+AUTH_LDAP_FIRSTNAME_FIELD = "givenName"
+AUTH_LDAP_LASTNAME_FIELD = "sn"
+AUTH_LDAP_EMAIL_FIELD = "mail"
+
+# For mapping LDAP groups to Airflow roles
+AUTH_LDAP_GROUP_FIELD = "memberOf" # Common for Active Directory
+AUTH_ROLES_MAPPING = {
+    "cn=airflow-admin,ou=groups,dc=yourdomain,dc=com": ["Admin"],
+    "cn=airflow-viewer,ou=groups,dc=yourdomain,dc=com": ["Viewer"],
+    "cn=airflow-developer,ou=groups,dc=yourdomain,dc=com": ["User"], # Or a custom 'Developer' role
+}
+# Optional: if a user is not in any mapped groups, assign this default role
+AUTH_USER_REGISTRATION_ROLE = "Viewer"
+AUTH_ROLES_SYNC_AT_LOGIN = True
+AUTH_USER_REGISTRATION = True # Auto-create users if they don't exist
+# ...
+
+   * For OAuth/OIDC (AUTH_OAUTH):
+     * OAUTH_PROVIDERS: A list of dictionaries, each defining an OAuth provider (e.g., Azure AD, Okta).
+       * name: A display name.
+       * token_key, base_url, request_token_url, access_token_url, authorize_url
+       * client_id, client_secret (obtained from your IdP app registration)
+       * scope: The OAuth scopes you request (e.g., openid profile email groups).
+       * api_base_url: URL for user info or group claims.
+       * access_token_params, request_token_params, authorize_params
+     * Crucially for Permissions: FAB_ROLES_MAPPING (or AUTH_ROLES_MAPPING in some contexts), AUTH_ROLES_SYNC_AT_LOGIN, AUTH_USER_REGISTRATION_ROLE.
+       * You'll typically implement a Custom Security Manager (see point 3) to parse group claims from the IdP's ID Token or UserInfo endpoint and map them to Airflow roles.
+       # Example for OAuth/OIDC integration in webserver_config.py
+# ... (other Flask AppBuilder imports and settings) ...
+from flask_appbuilder.security.manager import AUTH_OAUTH
+AUTH_TYPE = AUTH_OAUTH
+
+# This is a basic example, consult FAB/Airflow docs for your specific provider
+OAUTH_PROVIDERS = [
+    {
+        'name': 'AzureAD',
+        'token_key': 'access_token',
+        'icon': 'fa-windows',
+        'remote_app': {
+            'client_id': os.environ.get('AZURE_CLIENT_ID'), # Use environment variables for secrets
+            'client_secret': os.environ.get('AZURE_CLIENT_SECRET'),
+            'api_base_url': 'https://graph.microsoft.com/v1.0/',
+            'client_kwargs': {'scope': 'User.Read openid profile email'}, # Request 'User.Read' to get user info
+            'request_token_url': None,
+            'access_token_url': 'https://login.microsoftonline.com/{YOUR_TENANT_ID}/oauth2/v2.0/token',
+            'authorize_url': 'https://login.microsoftonline.com/{YOUR_TENANT_ID}/oauth2/v2.0/authorize',
+            'redirect_uri': 'http://your-airflow-webserver-url/oauth-authorized/azuread'
+        }
+    }
+]
+# Custom Security Manager is usually needed for role mapping with OAuth/OIDC
+# AUTH_USER_REGISTRATION_ROLE = "Viewer" # Default for new users
+# AUTH_ROLES_SYNC_AT_LOGIN = True
+# ... (will be continued in custom security manager section)
+
+3. Implement a Custom Security Manager (Often Needed for OAuth/OIDC)
+For more complex OAuth/OIDC scenarios, especially when mapping IdP groups/roles to Airflow roles, you'll likely need to implement a custom Flask AppBuilder Security Manager.
+ * Create a Python file: e.g., your_security_manager.py in a directory on your PYTHONPATH (e.g., AIRFLOW_HOME/plugins or a custom Python package).
+ * Extend FabAirflowSecurityManagerOverride:
+   # your_security_manager.py
+from airflow.providers.fab.auth_manager.security_manager.override import FabAirflowSecurityManagerOverride
+from flask_appbuilder.security.models import User
+from flask_appbuilder.security.manager import BaseSecurityManager
+import logging
+
+log = logging.getLogger(__name__)
+
+class CustomAirflowSecurityManager(FabAirflowSecurityManagerOverride):
+
+    def get_current_user_roles(self) -> list[str]:
+        """
+        Override this method to fetch roles from your SSO provider.
+        This method is called during login and when refreshing user roles.
+        """
+        user = self.get_user_by_username(self.get_current_user_username())
+        if user:
+            # If using LDAP, roles might be directly attached or pulled from LDAP groups
+            # If using OAUTH, you'd typically extract group claims from the ID token
+            # or query the /userinfo endpoint.
+
+            # Example: If your OAuth provider sends group claims in a specific key
+            # This depends heavily on your IdP configuration
+            # For Azure AD, groups might be in 'groups' claim or queried via MS Graph API.
+            # You'd need to get the user's access token and make an API call.
+
+            # For demonstration, let's assume you've pre-defined a mapping or
+            # can derive roles from user attributes/claims.
+            # In a real scenario, you'd parse JWT claims or make API calls here.
+
+            # This is a placeholder for actual group mapping logic
+            # You would likely have a function that maps raw IdP groups to Airflow roles
+            # Example:
+            # user_idp_groups = self._get_idp_groups_for_user(user) # Your custom method
+            # airflow_roles = self._map_idp_groups_to_airflow_roles(user_idp_groups)
+
+            # For a simple example, let's just return a default if not defined otherwise
+            # Or based on some custom logic
+            # If you're relying purely on AUTH_ROLES_MAPPING in webserver_config.py
+            # for LDAP, you might not need to override this unless you have custom logic.
+
+            # The default FAB behavior will apply roles from AUTH_ROLES_MAPPING or
+            # AUTH_USER_REGISTRATION_ROLE if no roles are explicitly set.
+
+            # This method should return a list of Airflow role names (strings)
+            # For advanced scenarios, this is where you'd bridge IdP groups to Airflow RBAC roles.
+            log.debug(f"User {user.username} has existing Airflow roles: {[r.name for r in user.roles]}")
+            return [r.name for r in user.roles] # Return existing roles, or implement custom logic
+        return []
+
+    # You might also need to override init_app and register_views if you add custom login/logout routes
+    # or want to customize Flask AppBuilder's security setup further.
+    # def init_app(self, app):
+    #     super().init_app(app)
+    #     # Custom initialization here if needed
+    #
+    # def register_views(self):
+    #     super().register_views()
+    #     # Custom view registration here if needed
+
+
+ * Reference in webserver_config.py:
+   # webserver_config.py
+# ... (other imports) ...
+from your_security_manager import CustomAirflowSecurityManager # Import your custom class
+
+# ... (AUTH_TYPE and OAUTH_PROVIDERS if using OAuth) ...
+
+# Set your custom security manager
+SECURITY_MANAGER_CLASS = CustomAirflowSecurityManager
+
+# ... (other settings) ...
+
+4. Configure RBAC (Role-Based Access Control) in Airflow
+Airflow's UI uses Flask AppBuilder's RBAC system.
+ * Default Roles: Airflow comes with predefined roles: Admin, Op, User, Viewer, Public. These have a set of pre-defined permissions.
+ * Custom Roles: You can create custom roles to align with your enterprise's permission model.
+   * Via UI: Admin -> Security -> Roles
+   * Via CLI: airflow roles create <ROLE_NAME>
+   * Assigning Permissions: Once a role is created, you can assign granular permissions (e.g., can_read on Dag, can_edit on Connection) via the UI or CLI.
+     * airflow roles add-permission <ROLE_NAME> <RESOURCE_NAME> <ACTION_NAME> (e.g., airflow roles add-permission my_dag_dev_role Dag my_dag_name.py can_read)
+ * Mapping SSO Groups/Roles to Airflow Roles:
+   * LDAP: As shown in the AUTH_ROLES_MAPPING example in webserver_config.py, this is where you directly link LDAP group DNs/names to Airflow role names.
+   * OAuth/OIDC with Custom Security Manager: Your custom security manager's get_current_user_roles method (or a helper function it calls) is responsible for taking the group/role information from the IdP (e.g., from JWT claims, userinfo endpoint) and mapping it to the Airflow roles you've defined.
+Best Practice for RBAC with SSO:
+ * Define your enterprise's security groups.
+ * Create corresponding roles in Airflow (e.g., Airflow Admin, Airflow DAG Developer, Airflow Viewer).
+ * Map your enterprise security groups to these Airflow roles using AUTH_ROLES_MAPPING (for LDAP) or within your custom security manager (for OAuth/OIDC).
+ * Grant permissions to the Airflow roles (not directly to users). For example, your Airflow DAG Developer role might have can_read and can_edit on Dag, can_read on Connection, but not can_read on Variable or can_delete on DagRun.
+ * Use DAG-level permissions: For very fine-grained control, Airflow allows you to assign permissions to specific DAGs. This means you can create a role that can only view or operate on certain DAGs.
+5. Deployment Considerations
+ * Secrets Management: Never hardcode sensitive information (client secrets, LDAP bind passwords) in webserver_config.py. Use environment variables (e.g., os.environ.get()) or a secret management solution (Vault, AWS Secrets Manager, Kubernetes Secrets) and inject them into the Airflow webserver container.
+ * SSL/TLS: Ensure your Airflow webserver is running over HTTPS to secure communication with the browser and with your SSO provider.
+ * Network Access: Verify that your Airflow webserver can reach your LDAP server or OAuth provider's endpoints.
+ * Containerization (Docker/Kubernetes): If you're deploying Airflow in containers, ensure your Dockerfile includes python-ldap if using LDAP, and any other necessary Python packages (like requests for OAuth API calls). Also, ensure your webserver_config.py is correctly mounted into the container.
+ * Testing: Thoroughly test the login flow, role mapping, and permission enforcement for various users and groups.
+Summary of Steps:
+ * Identify your Enterprise IdP: LDAP/AD or OAuth/OIDC (Azure AD, Okta, etc.).
+ * Register Airflow as an Application (for OAuth/OIDC): Obtain client_id and client_secret, configure redirect URLs.
+ * Update webserver_config.py:
+   * Set AUTH_TYPE.
+   * Configure IdP-specific parameters.
+   * Set AUTH_ROLES_SYNC_AT_LOGIN = True.
+   * Set AUTH_USER_REGISTRATION = True and AUTH_USER_REGISTRATION_ROLE.
+   * For LDAP, define AUTH_ROLES_MAPPING.
+   * For complex OAuth/OIDC, define SECURITY_MANAGER_CLASS to point to your custom security manager.
+ * Implement Custom Security Manager (if needed): Create a Python class to handle advanced role mapping from OAuth claims/groups.
+ * Define Airflow Roles: Create custom roles in Airflow to match your enterprise's access levels (e.g., Airflow Admin, Airflow Developer, Airflow Viewer).
+ * Assign Permissions to Airflow Roles: Grant granular permissions to these roles using the Airflow UI or CLI.
+ * Ensure Proper Secrets Management and Network Configuration.
+ * Restart Airflow Webserver to apply changes.
+By carefully configuring these aspects, you can successfully integrate Airflow into your enterprise's SSO and permission management infrastructure.
