@@ -1,0 +1,11 @@
+import requests
+
+def call_local_service():
+    url = "https://localhost:3056"
+    try:
+        response = requests.get(url, verify=False, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"Service call failed: {e}")
+        raise
