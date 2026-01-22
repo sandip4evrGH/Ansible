@@ -1,0 +1,707 @@
+# 1-Day Rapid Monitoring Setup
+
+## **Today's Goal: Get Basic Monitoring Running by EOD**
+
+### **Timeline (8-hour workday)**
+
+```
+Hour 1-2:   CloudWatch + SSM Setup
+Hour 3-4:   Health Check Scripts + Testing
+Hour 5-6:   Airflow DAG Creation
+Hour 7:     Dashboard Setup
+Hour 8:     Alerts + Validation
+```
+
+---
+
+## **Hour 1-2: Foundation Setup (120 min)**
+
+### **Task 1: Create CloudWatch Log Groups (15 min)**
+
+**AWS Console Method:**
+```
+CloudWatch → Logs → Create log group
+
+Create these 4 log groups:
+1. /monitoring/airflow
+2. /monitoring/kafka
+3. /monitoring/storm
+4. /monitoring/cassandra
+
+Retention: 7 days each
+```
+
+**CLI Method (faster):**
+```bash
+aws logs create-log-group --log-group-name /monitoring/airflow
+aws logs create-log-group --log-group-name /monitoring/kafka
+aws logs create-log-group --log-group-name /monitoring/storm
+aws logs create-log-group --log-group-name /monitoring/cassandra
+```
+
+---
+
+### **Task 2: Verify SSM Agent (15 min)**
+
+**Check all instances have SSM agent:**
+```bash
+aws ssm describe-instance-information \
+  --filters "Key=PingStatus,Values=Online" \
+  --query "InstanceInformationList[*].[InstanceId,PingStatus,PlatformName]" \
+  --output table
+```
+
+Should see all your instances listed. If not:
+- Install SSM agent on missing instances
+- Check IAM role has `AmazonSSMManagedInstanceCore` policy
+
+---
+
+### **Task 3: Create SNS Alert Topic (10 min)**
+
+```bash
+# Create topic
+aws sns create-topic --name platform-health-alerts
+
+# Subscribe your email
+aws sns subscribe \
+  --topic-arn arn:aws:sns:REGION:ACCOUNT:platform-health-alerts \
+  --protocol email \
+  --notification-endpoint your-email@tcs.com
+
+# Confirm subscription from email
+```
+
+---
+
+### **Task 4: Test SSM Command (20 min)**
+
+**Pick ONE instance to test first (e.g., Kafka broker):**
+
+```bash
+aws ssm send-command \
+  --instance-ids i-YOUR-KAFKA-INSTANCE \
+  --document-name "AWS-RunShellScript" \
+  --parameters 'commands=["echo {\"test\":\"success\",\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"]' \
+  --cloud-watch-output-config '{
+    "CloudWatchLogGroupName":"/monitoring/kafka",
+    "CloudWatchOutputEnabled":true
+  }'
+```
+
+**Verify in CloudWatch Logs:**
+- Go to /monitoring/kafka log group
+- Should see log stream with output
+- Should see the JSON test message
+
+**If this works, you're good to proceed!**
+
+---
+
+### **Task 5: Update IAM Roles (30 min)**
+
+**Airflow Instance Role - Add inline policy:**
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ssm:SendCommand",
+        "ssm:GetCommandInvocation",
+        "ssm:ListCommands",
+        "ec2:DescribeInstances"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "logs:GetLogEvents",
+        "logs:DescribeLogStreams"
+      ],
+      "Resource": "arn:aws:logs:*:*:log-group:/monitoring/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "sns:Publish",
+      "Resource": "arn:aws:sns:*:*:platform-health-alerts"
+    }
+  ]
+}
+```
+
+**All Target Instance Roles - Verify they have:**
+```json
+{
+  "Effect": "Allow",
+  "Action": [
+    "logs:CreateLogStream",
+    "logs:PutLogEvents"
+  ],
+  "Resource": "arn:aws:logs:*:*:log-group:/monitoring/*"
+}
+```
+
+---
+
+### **Task 6: Create Health Check Scripts on Instances (30 min)**
+
+**On Airflow Instance:**
+```bash
+sudo mkdir -p /opt/monitoring
+sudo vi /opt/monitoring/airflow_health.sh
+```
+
+**Airflow Health Check Script:**
+```bash
+#!/bin/bash
+INSTANCE_ID=$(ec2-metadata --instance-id | cut -d " " -f 2)
+TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+# Scheduler check
+SCHED=$(ps aux | grep "airflow scheduler" | grep -v grep | wc -l)
+
+# Webserver check  
+WEB=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health 2>/dev/null)
+[ -z "$WEB" ] && WEB=0
+
+# Status determination
+STATUS="HEALTHY"
+[ $SCHED -eq 0 ] && STATUS="UNHEALTHY"
+[ "$WEB" != "200" ] && STATUS="UNHEALTHY"
+
+# Output JSON
+cat <<EOF
+{
+  "timestamp": "$TIMESTAMP",
+  "instance_id": "$INSTANCE_ID",
+  "component": "airflow",
+  "checks": {
+    "scheduler_running": $([ $SCHED -gt 0 ] && echo true || echo false),
+    "webserver_status": $WEB
+  },
+  "overall_status": "$STATUS"
+}
+EOF
+```
+
+```bash
+sudo chmod +x /opt/monitoring/airflow_health.sh
+```
+
+---
+
+**On Each Kafka Instance:**
+```bash
+sudo mkdir -p /opt/monitoring
+sudo vi /opt/monitoring/kafka_health.sh
+```
+
+**Kafka Health Check Script:**
+```bash
+#!/bin/bash
+INSTANCE_ID=$(ec2-metadata --instance-id | cut -d " " -f 2)
+TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+# Process check
+PROC=$(ps aux | grep kafka.Kafka | grep -v grep | wc -l)
+
+# Get broker ID
+BROKER_ID=$(cat /var/kafka-kraft/meta.properties 2>/dev/null | grep node.id | cut -d= -f2)
+[ -z "$BROKER_ID" ] && BROKER_ID="unknown"
+
+# Check if port 9092 listening
+PORT=$(netstat -ln | grep :9092 | wc -l)
+
+# Status
+STATUS="HEALTHY"
+[ $PROC -eq 0 ] && STATUS="UNHEALTHY"
+[ $PORT -eq 0 ] && STATUS="UNHEALTHY"
+
+cat <<EOF
+{
+  "timestamp": "$TIMESTAMP",
+  "instance_id": "$INSTANCE_ID",
+  "broker_id": "$BROKER_ID",
+  "component": "kafka",
+  "checks": {
+    "process_running": $([ $PROC -gt 0 ] && echo true || echo false),
+    "port_listening": $([ $PORT -gt 0 ] && echo true || echo false)
+  },
+  "overall_status": "$STATUS"
+}
+EOF
+```
+
+```bash
+sudo chmod +x /opt/monitoring/kafka_health.sh
+```
+
+---
+
+**On Storm Nimbus:**
+```bash
+sudo mkdir -p /opt/monitoring
+sudo vi /opt/monitoring/storm_nimbus_health.sh
+```
+
+```bash
+#!/bin/bash
+INSTANCE_ID=$(ec2-metadata --instance-id | cut -d " " -f 2)
+TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+PROC=$(ps aux | grep "org.apache.storm.daemon.nimbus" | grep -v grep | wc -l)
+PORT=$(netstat -ln | grep :6627 | wc -l)
+
+STATUS="HEALTHY"
+[ $PROC -eq 0 ] && STATUS="UNHEALTHY"
+
+cat <<EOF
+{
+  "timestamp": "$TIMESTAMP",
+  "instance_id": "$INSTANCE_ID",
+  "component": "storm-nimbus",
+  "checks": {
+    "process_running": $([ $PROC -gt 0 ] && echo true || echo false),
+    "thrift_port_listening": $([ $PORT -gt 0 ] && echo true || echo false)
+  },
+  "overall_status": "$STATUS"
+}
+EOF
+```
+
+```bash
+sudo chmod +x /opt/monitoring/storm_nimbus_health.sh
+```
+
+---
+
+**On Each Cassandra Node:**
+```bash
+sudo mkdir -p /opt/monitoring
+sudo vi /opt/monitoring/cassandra_health.sh
+```
+
+```bash
+#!/bin/bash
+INSTANCE_ID=$(ec2-metadata --instance-id | cut -d " " -f 2)
+TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+NODE_IP=$(hostname -i)
+
+PROC=$(ps aux | grep CassandraDaemon | grep -v grep | wc -l)
+
+# Get node status (UN = Up Normal)
+NODE_STATE="unknown"
+if [ $PROC -gt 0 ]; then
+  NODE_STATE=$(nodetool status 2>/dev/null | grep "$NODE_IP" | awk '{print $1}')
+fi
+
+STATUS="HEALTHY"
+[ $PROC -eq 0 ] && STATUS="UNHEALTHY"
+[ "$NODE_STATE" != "UN" ] && STATUS="UNHEALTHY"
+
+cat <<EOF
+{
+  "timestamp": "$TIMESTAMP",
+  "instance_id": "$INSTANCE_ID",
+  "node_ip": "$NODE_IP",
+  "component": "cassandra",
+  "checks": {
+    "process_running": $([ $PROC -gt 0 ] && echo true || echo false),
+    "node_state": "$NODE_STATE"
+  },
+  "overall_status": "$STATUS"
+}
+EOF
+```
+
+```bash
+sudo chmod +x /opt/monitoring/cassandra_health.sh
+```
+
+---
+
+## **Hour 3-4: Manual Testing (120 min)**
+
+### **Test Each Component (15 min per component)**
+
+**Test Airflow:**
+```bash
+aws ssm send-command \
+  --instance-ids i-AIRFLOW-INSTANCE \
+  --document-name "AWS-RunShellScript" \
+  --parameters 'commands=["/opt/monitoring/airflow_health.sh"]' \
+  --cloud-watch-output-config '{
+    "CloudWatchLogGroupName":"/monitoring/airflow",
+    "CloudWatchOutputEnabled":true
+  }'
+```
+
+Wait 30 seconds, then check CloudWatch Logs → /monitoring/airflow
+
+**Test Kafka (all brokers):**
+```bash
+aws ssm send-command \
+  --instance-ids i-KAFKA-1 i-KAFKA-2 i-KAFKA-3 \
+  --document-name "AWS-RunShellScript" \
+  --parameters 'commands=["/opt/monitoring/kafka_health.sh"]' \
+  --cloud-watch-output-config '{
+    "CloudWatchLogGroupName":"/monitoring/kafka",
+    "CloudWatchOutputEnabled":true
+  }'
+```
+
+**Test Storm Nimbus:**
+```bash
+aws ssm send-command \
+  --instance-ids i-NIMBUS-INSTANCE \
+  --document-name "AWS-RunShellScript" \
+  --parameters 'commands=["/opt/monitoring/storm_nimbus_health.sh"]' \
+  --cloud-watch-output-config '{
+    "CloudWatchLogGroupName":"/monitoring/storm",
+    "CloudWatchOutputEnabled":true
+  }'
+```
+
+**Test Cassandra (all nodes):**
+```bash
+aws ssm send-command \
+  --instance-ids i-CASS-1 i-CASS-2 i-CASS-3 \
+  --document-name "AWS-RunShellScript" \
+  --parameters 'commands=["/opt/monitoring/cassandra_health.sh"]' \
+  --cloud-watch-output-config '{
+    "CloudWatchLogGroupName":"/monitoring/cassandra",
+    "CloudWatchOutputEnabled":true
+  }'
+```
+
+**Verify each test shows JSON output in CloudWatch Logs!**
+
+---
+
+## **Hour 5-6: Airflow DAG (120 min)**
+
+### **Create Monitoring DAG**
+
+**On Airflow instance, create file:**
+```bash
+vi /opt/airflow/dags/platform_health_monitor.py
+```
+
+**Simple Monitoring DAG:**
+
+```python
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from datetime import datetime, timedelta
+import boto3
+import time
+import json
+
+default_args = {
+    'owner': 'platform-ops',
+    'depends_on_past': False,
+    'start_date': datetime(2026, 1, 22),
+    'retries': 1,
+    'retry_delay': timedelta(minutes=2)
+}
+
+dag = DAG(
+    'platform_health_monitor',
+    default_args=default_args,
+    description='Monitor platform health',
+    schedule_interval='*/5 * * * *',  # Every 5 minutes
+    catchup=False,
+    max_active_runs=1
+)
+
+# REPLACE WITH YOUR ACTUAL INSTANCE IDS
+INSTANCE_CONFIG = {
+    'airflow': ['i-AIRFLOW-INSTANCE-ID'],
+    'kafka': ['i-KAFKA-1', 'i-KAFKA-2', 'i-KAFKA-3'],
+    'storm_nimbus': ['i-NIMBUS-INSTANCE-ID'],
+    'cassandra': ['i-CASS-1', 'i-CASS-2', 'i-CASS-3']
+}
+
+def run_health_check(component, instances, script_path, log_group):
+    """Run SSM command and wait for completion"""
+    ssm = boto3.client('ssm', region_name='us-east-1')  # UPDATE REGION
+    
+    print(f"Checking {component} health on {len(instances)} instance(s)")
+    
+    try:
+        response = ssm.send_command(
+            InstanceIds=instances,
+            DocumentName='AWS-RunShellScript',
+            Parameters={'commands': [script_path]},
+            CloudWatchOutputConfig={
+                'CloudWatchLogGroupName': log_group,
+                'CloudWatchOutputEnabled': True
+            },
+            TimeoutSeconds=60
+        )
+        
+        command_id = response['Command']['CommandId']
+        print(f"Command ID: {command_id}")
+        
+        # Wait for completion (max 90 seconds)
+        for i in range(18):  # 18 * 5 = 90 seconds
+            time.sleep(5)
+            
+            status = ssm.list_commands(
+                CommandId=command_id
+            )['Commands'][0]['Status']
+            
+            print(f"Status: {status}")
+            
+            if status in ['Success', 'Failed', 'TimedOut']:
+                break
+        
+        if status == 'Success':
+            print(f"{component} health check completed successfully")
+            return True
+        else:
+            print(f"{component} health check failed with status: {status}")
+            return False
+            
+    except Exception as e:
+        print(f"Error checking {component}: {str(e)}")
+        raise
+
+# Create tasks for each component
+check_airflow = PythonOperator(
+    task_id='check_airflow',
+    python_callable=run_health_check,
+    op_kwargs={
+        'component': 'airflow',
+        'instances': INSTANCE_CONFIG['airflow'],
+        'script_path': '/opt/monitoring/airflow_health.sh',
+        'log_group': '/monitoring/airflow'
+    },
+    dag=dag
+)
+
+check_kafka = PythonOperator(
+    task_id='check_kafka',
+    python_callable=run_health_check,
+    op_kwargs={
+        'component': 'kafka',
+        'instances': INSTANCE_CONFIG['kafka'],
+        'script_path': '/opt/monitoring/kafka_health.sh',
+        'log_group': '/monitoring/kafka'
+    },
+    dag=dag
+)
+
+check_storm = PythonOperator(
+    task_id='check_storm',
+    python_callable=run_health_check,
+    op_kwargs={
+        'component': 'storm',
+        'instances': INSTANCE_CONFIG['storm_nimbus'],
+        'script_path': '/opt/monitoring/storm_nimbus_health.sh',
+        'log_group': '/monitoring/storm'
+    },
+    dag=dag
+)
+
+check_cassandra = PythonOperator(
+    task_id='check_cassandra',
+    python_callable=run_health_check,
+    op_kwargs={
+        'component': 'cassandra',
+        'instances': INSTANCE_CONFIG['cassandra'],
+        'script_path': '/opt/monitoring/cassandra_health.sh',
+        'log_group': '/monitoring/cassandra'
+    },
+    dag=dag
+)
+
+# All checks run in parallel
+[check_airflow, check_kafka, check_storm, check_cassandra]
+```
+
+**Activate and test:**
+```bash
+# Check DAG appears
+airflow dags list | grep platform_health
+
+# Test manually
+airflow dags test platform_health_monitor 2026-01-22
+```
+
+---
+
+## **Hour 7: Quick Dashboard (60 min)**
+
+### **Create CloudWatch Dashboard**
+
+**AWS Console:**
+1. CloudWatch → Dashboards → Create dashboard
+2. Name: `Platform-Health-Monitor`
+3. Add widgets (use these queries):
+
+**Widget 1: Latest Status by Component**
+```
+Source: /monitoring/airflow, /monitoring/kafka, /monitoring/storm, /monitoring/cassandra
+
+Query:
+fields @timestamp, component, overall_status
+| sort @timestamp desc
+| dedup component
+| display component, overall_status, @timestamp
+```
+
+**Widget 2: Airflow Health**
+```
+Source: /monitoring/airflow
+
+Query:
+fields @timestamp, checks.scheduler_running, checks.webserver_status
+| sort @timestamp desc
+| limit 10
+```
+
+**Widget 3: Kafka Broker Status**
+```
+Source: /monitoring/kafka
+
+Query:
+fields @timestamp, broker_id, checks.process_running, overall_status
+| sort @timestamp desc
+| dedup broker_id
+```
+
+**Widget 4: Cassandra Nodes**
+```
+Source: /monitoring/cassandra
+
+Query:
+fields @timestamp, node_ip, checks.node_state, overall_status
+| sort @timestamp desc
+| dedup node_ip
+```
+
+**Widget 5: Health Check Count (Last Hour)**
+```
+Source: All log groups
+
+Query:
+fields @timestamp
+| stats count() by bin(5m)
+```
+
+---
+
+## **Hour 8: Alerts + Validation (60 min)**
+
+### **Create Critical Alerts (30 min)**
+
+**Alert 1: Any Component Unhealthy**
+
+1. CloudWatch → Log groups → /monitoring/airflow
+2. Create metric filter:
+   - Filter pattern: `{ $.overall_status = "UNHEALTHY" }`
+   - Metric namespace: `PlatformMonitoring`
+   - Metric name: `UnhealthyComponents`
+   - Metric value: `1`
+
+3. Repeat for all 4 log groups
+
+4. Create Alarm:
+   - Metric: `UnhealthyComponents` (Sum across all log groups)
+   - Threshold: `>= 1`
+   - Period: 5 minutes
+   - Evaluation periods: 2
+   - Action: SNS → platform-health-alerts
+
+---
+
+### **Final Validation (30 min)**
+
+**Test 1: Verify DAG is Running**
+```bash
+# Check DAG runs
+airflow dags list-runs -d platform_health_monitor
+
+# Should see runs every 5 minutes
+```
+
+**Test 2: Check CloudWatch Logs**
+- All 4 log groups should have recent entries
+- JSON format should be correct
+- Status should be HEALTHY
+
+**Test 3: View Dashboard**
+- Open CloudWatch dashboard
+- Should see all widgets populated
+- Status should show HEALTHY for all
+
+**Test 4: Test Alert (optional)**
+```bash
+# Stop Kafka on one node to trigger alert
+sudo systemctl stop kafka
+
+# Wait 10 minutes
+# Should receive email alert
+```
+
+---
+
+## **End of Day Checklist**
+
+- [ ] All 4 CloudWatch log groups created
+- [ ] SNS topic created and email confirmed
+- [ ] SSM agent verified on all instances
+- [ ] Health check scripts deployed on all instances
+- [ ] Manual SSM commands tested successfully
+- [ ] Airflow DAG created and running every 5 minutes
+- [ ] CloudWatch Dashboard created with 5 widgets
+- [ ] At least 1 critical alert configured
+- [ ] Logs showing in CloudWatch from all components
+- [ ] Dashboard showing current status
+
+---
+
+## **Tomorrow Morning: Quick Verification**
+
+```bash
+# 1. Check DAG ran overnight
+airflow dags list-runs -d platform_health_monitor --state success
+
+# 2. Quick CloudWatch Logs check
+aws logs tail /monitoring/kafka --since 1h --follow
+
+# 3. Check dashboard
+# Open CloudWatch console → Dashboards → Platform-Health-Monitor
+```
+
+---
+
+## **Quick Troubleshooting**
+
+**If SSM commands fail:**
+- Check SSM agent status: `sudo systemctl status amazon-ssm-agent`
+- Check IAM role on instance
+- Check script permissions: `ls -la /opt/monitoring/`
+
+**If logs not appearing in CloudWatch:**
+- Check script runs locally: `/opt/monitoring/airflow_health.sh`
+- Check CloudWatch agent logs: `/var/log/amazon/ssm/amazon-ssm-agent.log`
+- Verify IAM permissions for logs:PutLogEvents
+
+**If DAG not running:**
+- Check Airflow scheduler: `airflow dags list`
+- Check DAG syntax: `python /opt/airflow/dags/platform_health_monitor.py`
+- Check Airflow logs: `tail -f /opt/airflow/logs/scheduler/latest/`
+
+**If alerts not working:**
+- Confirm email subscription to SNS
+- Check metric filter created correctly
+- Verify alarm is in ALARM state
+
+---
+
+**This gets you functional monitoring TODAY. Ready to start? Begin with Hour 1-2 setup!**
